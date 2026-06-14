@@ -18,6 +18,7 @@ Configure via environment variables or a config.json next to this file:
     TG_PAGE_SIZE   sessions per selection page       (default 5)
 """
 
+import hashlib
 import html
 import json
 import math
@@ -27,6 +28,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -81,6 +83,7 @@ def require_config():
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "muxpost")
 PIDFILE = os.path.join(STATE_DIR, "muxpost.pid")
 NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
 # --------------------------------------------------------------------------
@@ -115,6 +118,14 @@ def api(method, _timeout=20, **params):
     try:
         with urllib.request.urlopen(req, timeout=_timeout) as resp:
             return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode()
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[api] {method} failed: HTTP {exc.code} {detail}", file=sys.stderr)
+        return {"ok": False, "error": str(exc), "detail": detail}
     except Exception as exc:  # noqa: BLE001
         print(f"[api] {method} failed: {exc}", file=sys.stderr)
         return {"ok": False, "error": str(exc)}
@@ -371,6 +382,33 @@ def do_new(chat_id, name, workdir, reply_to=None):
 # --------------------------------------------------------------------------
 
 
+def _pane_hash(pane):
+    # stable across processes (unlike hash()) so persisted state survives restarts
+    return hashlib.sha1(pane.encode("utf-8", "replace")).hexdigest()
+
+
+def load_state():
+    """Restore per-session report state so a restart doesn't re-notify."""
+    try:
+        with open(STATE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            STATE.update(data)
+    except (OSError, ValueError):
+        pass
+
+
+def save_state():
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(STATE, fh)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass
+
+
 def monitor_tick():
     live = list_sessions()
     live_set = set(live)
@@ -378,8 +416,13 @@ def monitor_tick():
         pane = capture_pane(session)
         if pane is None:
             continue
-        digest = str(hash(pane))
-        st = STATE.setdefault(session, {"hash": None, "count": 0, "reported": False})
+        digest = _pane_hash(pane)
+        st = STATE.get(session)
+        if st is None:
+            # First time we see this session (fresh start or newly created):
+            # treat whatever is on screen now as a baseline — don't notify it.
+            STATE[session] = {"hash": digest, "count": IDLE_TICKS, "reported": True}
+            continue
         if digest == st["hash"]:
             st["count"] += 1
             if st["count"] == IDLE_TICKS and not st["reported"]:
@@ -394,6 +437,7 @@ def monitor_tick():
     # forget sessions that disappeared
     for gone in [s for s in STATE if s not in live_set]:
         STATE.pop(gone, None)
+    save_state()
 
 
 # --------------------------------------------------------------------------
@@ -763,6 +807,7 @@ def main():
           f"Watching '{PREFIX}*' every {INTERVAL}s, "
           f"reporting after {IDLE_TICKS} idle ticks.")
     register_commands()
+    load_state()  # restore report flags so a restart doesn't re-notify
 
     # record our PID and install an in-place restart on SIGHUP
     try:
