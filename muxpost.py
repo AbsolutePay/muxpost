@@ -95,6 +95,7 @@ PIDFILE = os.path.join(STATE_DIR, "muxpost.pid")
 NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 LAST_SENT_FILE = os.path.join(STATE_DIR, "last_sent.json")
+OFFSET_FILE = os.path.join(STATE_DIR, "offset.json")
 SNAPSHOT_FILE = os.path.join(STATE_DIR, "sessions_snapshot.json")
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
@@ -601,6 +602,33 @@ def save_state():
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(STATE, fh)
         os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass
+
+
+def load_offset():
+    """Restore the Telegram getUpdates offset, or None if unset.
+
+    Persisting this is what stops a /restart or /upgrade from looping: the
+    command's update must be acknowledged to Telegram (by fetching with a
+    higher offset) or it's redelivered forever. We re-exec before the next
+    fetch, so the offset has to survive the re-exec on disk.
+    """
+    try:
+        with open(OFFSET_FILE, encoding="utf-8") as fh:
+            val = json.load(fh)
+        return int(val)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def save_offset(offset):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = OFFSET_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(offset, fh)
+        os.replace(tmp, OFFSET_FILE)
     except OSError:
         pass
 
@@ -1191,7 +1219,7 @@ def main():
         if n:
             print(f"restored {n} session(s) from snapshot")
 
-    offset = None
+    offset = load_offset()  # resume past already-handled updates (survives re-exec)
     last_tick = 0.0
     last_snapshot = 0.0
     while True:
@@ -1223,6 +1251,7 @@ def main():
             continue
         for update in res["result"]:
             offset = update["update_id"] + 1
+            save_offset(offset)  # persist BEFORE dispatch: a /restart re-execs
             dispatch(update)
 
 
