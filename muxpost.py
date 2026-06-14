@@ -374,15 +374,44 @@ def detect_queue(pane):
     return queued or None
 
 
-def queue_keyboard(full, pane):
-    """A 'send queued message' button if the session has one staged, else None."""
-    q = detect_queue(pane)
-    if not q:
+def detect_menu(pane):
+    """Return [(num, label), …] if an interactive selection menu is showing.
+
+    Claude renders a numbered menu ('❯ 1. …', '  2. …') with an
+    'Enter to select · ↑/↓ to navigate · Esc to cancel' footer; pressing the
+    number selects that option. Description lines (deeper indent) are ignored.
+    """
+    if not pane:
         return None
-    label = q if len(q) <= 40 else q[:39] + "…"
-    return {"inline_keyboard": [[
-        {"text": f"▶️ Send queued: {label}", "callback_data": f"q|{display_name(full)}"}
-    ]]}
+    lines = pane.split("\n")
+    tail = "\n".join(lines[-4:])
+    if not ("Esc to cancel" in tail or "to navigate" in tail or "Enter to select" in tail):
+        return None
+    opts = []
+    for line in lines:
+        m = re.match(r"^(?:❯ |  )(\d+)\.\s+(.+)$", line)
+        if m:
+            opts.append((m.group(1), m.group(2).strip()))
+    return opts or None
+
+
+def action_keyboard(full, pane):
+    """Context buttons for a report/status: menu options, or a queued message."""
+    opts = detect_menu(pane)
+    if opts:
+        rows = []
+        for num, label in opts:
+            t = f"{num}. {label}"
+            rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
+                          "callback_data": f"o|{display_name(full)}|{num}"}])
+        return {"inline_keyboard": rows}
+    q = detect_queue(pane)
+    if q:
+        label = q if len(q) <= 40 else q[:39] + "…"
+        return {"inline_keyboard": [[
+            {"text": f"▶️ Send queued: {label}", "callback_data": f"q|{display_name(full)}"}
+        ]]}
+    return None
 
 
 def build_keyboard(tag, sessions, page):
@@ -443,7 +472,7 @@ def do_new(chat_id, name, workdir, reply_to=None):
             chat_id,
             f"ℹ️ <b>{html.escape(display_name(full))}</b> is already running.\n"
             + status_text(full, pane),
-            reply_markup=queue_keyboard(full, pane),
+            reply_markup=action_keyboard(full, pane),
             reply_to=reply_to,
         )
         if mid:
@@ -565,7 +594,7 @@ def monitor_tick():
             if st["count"] == IDLE_TICKS and not st["reported"]:
                 st["reported"] = True
                 mid = send(USER_ID, status_text(session, pane, "💤"),
-                           reply_markup=queue_keyboard(session, pane))
+                           reply_markup=action_keyboard(session, pane))
                 if mid:
                     MSG_SESSION[mid] = session
         else:
@@ -706,7 +735,7 @@ def handle_message(msg):
                 return
             pane = capture_pane(full)
             mid = send(chat_id, status_text(full, pane),
-                       reply_markup=queue_keyboard(full, pane))
+                       reply_markup=action_keyboard(full, pane))
             if mid:
                 MSG_SESSION[mid] = full
         else:
@@ -749,6 +778,20 @@ def handle_callback(cq):
         answer(cq["id"], "Sent ✓" if ok else "Failed")
         edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
             {"text": "✅ Queued message sent" if ok else "⚠️ Failed to send",
+             "callback_data": "noop"}]]})
+        return
+
+    # Pick an option from a Claude selection menu (press the number).
+    if tag == "o":
+        full = full_name(kind)
+        if not session_exists(full):
+            answer(cq["id"], "Session is gone")
+            edit(chat_id, message_id, reply_markup=None)
+            return
+        ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
+        answer(cq["id"], f"Selected {val} ✓" if ok else "Failed")
+        edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
+            {"text": f"✅ Selected option {val}" if ok else "⚠️ Failed to send",
              "callback_data": "noop"}]]})
         return
 
@@ -828,7 +871,7 @@ def handle_callback(cq):
         if tag == "st":
             pane = capture_pane(full)
             edit(chat_id, message_id, text=status_text(full, pane),
-                 reply_markup=queue_keyboard(full, pane))
+                 reply_markup=action_keyboard(full, pane))
             MSG_SESSION[message_id] = full
             answer(cq["id"], "Reply to that message to type into it.")
             return
