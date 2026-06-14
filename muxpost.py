@@ -266,6 +266,17 @@ def session_exists(full):
     return _tmux(["has-session", "-t", full]).returncode == 0
 
 
+def kill_session(full):
+    """Kill the tmux session (ending its Claude process) and forget its state."""
+    ok = _tmux(["kill-session", "-t", full]).returncode == 0
+    if ok:
+        STATE.pop(full, None)
+        save_state()
+        if LAST_SENT.pop(full, None) is not None:
+            save_last_sent()
+    return ok
+
+
 def sanitize_name(s):
     """Make a string safe as a tmux session name / folder name."""
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", s.strip()).strip("-")
@@ -521,6 +532,14 @@ CONFIRM_KB = {"inline_keyboard": [[
 ]]}
 
 
+def kill_confirm_kb(disp):
+    """Two-button confirm for killing the session named `disp`."""
+    return {"inline_keyboard": [[
+        {"text": "💀 Kill it", "callback_data": f"kl|y|{disp}"},
+        {"text": "✖️ Cancel", "callback_data": f"kl|x|{disp}"},
+    ]]}
+
+
 def do_new(chat_id, name, workdir, reply_to=None):
     """Create the session (if absent), launch claude, and report it."""
     full = full_name(sanitize_name(name))
@@ -597,9 +616,7 @@ def load_last_sent():
         pass
 
 
-def mark_sent(session):
-    """Record that we just relayed a message to `session` and persist it."""
-    LAST_SENT[session] = int(time.time())
+def save_last_sent():
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         tmp = LAST_SENT_FILE + ".tmp"
@@ -608,6 +625,12 @@ def mark_sent(session):
         os.replace(tmp, LAST_SENT_FILE)
     except OSError:
         pass
+
+
+def mark_sent(session):
+    """Record that we just relayed a message to `session` and persist it."""
+    LAST_SENT[session] = int(time.time())
+    save_last_sent()
 
 
 def _session_field(session, fmt):
@@ -754,6 +777,8 @@ def handle_message(msg):
             "• <code>/new &lt;name&gt; [path]</code> — start one directly.\n"
             "• <code>/status</code> — pick a session to inspect.\n"
             "• <code>/status &lt;name&gt;</code> — inspect one directly.\n"
+            "• <code>/kill</code> — pick a session to kill (asks to confirm).\n"
+            "• <code>/kill &lt;name&gt;</code> — kill one directly (asks to confirm).\n"
             "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
             "• Send plain text — I'll ask which session to send it to.",
         )
@@ -823,6 +848,22 @@ def handle_message(msg):
                 MSG_SESSION[mid] = full
         else:
             show_selection(chat_id, "st", "Select a session to inspect:")
+        return
+
+    if text.startswith("/kill"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            disp = parts[1].strip()
+            full = full_name(disp)
+            if full not in set(list_sessions()):
+                send(chat_id, f"No session named <b>{html.escape(disp)}</b>.")
+                return
+            send(chat_id,
+                 f"⚠️ Kill <b>{html.escape(display_name(full))}</b>? "
+                 "This ends the tmux session and its Claude process.",
+                 reply_markup=kill_confirm_kb(display_name(full)))
+        else:
+            show_selection(chat_id, "kl", "Select a session to kill:")
         return
 
     if text.startswith("/"):
@@ -934,6 +975,37 @@ def handle_callback(cq):
             return
         answer(cq["id"])
         return
+
+    # Kill flow: pick -> confirm -> kill (pagination falls through to generic).
+    if tag == "kl" and kind in ("s", "y", "x"):
+        full = full_name(val)
+        disp = html.escape(display_name(full))
+        if kind == "x":
+            edit(chat_id, message_id, text=f"✖️ Cancelled. <b>{disp}</b> is untouched.")
+            answer(cq["id"])
+            return
+        if kind == "s":  # session picked -> ask for confirmation
+            if full not in set(list_sessions()):
+                edit(chat_id, message_id, text=f"Session <b>{disp}</b> is gone.")
+                answer(cq["id"])
+                return
+            edit(chat_id, message_id,
+                 text=f"⚠️ Kill <b>{disp}</b>? "
+                      "This ends the tmux session and its Claude process.",
+                 reply_markup=kill_confirm_kb(display_name(full)))
+            answer(cq["id"])
+            return
+        if kind == "y":  # confirmed -> kill
+            if not session_exists(full):
+                edit(chat_id, message_id, text=f"<b>{disp}</b> is already gone.")
+                answer(cq["id"])
+                return
+            ok = kill_session(full)
+            edit(chat_id, message_id,
+                 text=f"💀 Killed <b>{disp}</b>." if ok
+                      else f"⚠️ Failed to kill <b>{disp}</b>.")
+            answer(cq["id"], "Killed" if ok else "Failed")
+            return
 
     # Pagination.
     if kind == "p":
@@ -1065,6 +1137,7 @@ def restart_inplace():
 BOT_COMMANDS = [
     {"command": "status", "description": "Inspect a session (or pick one)"},
     {"command": "new", "description": "Start a new claude session"},
+    {"command": "kill", "description": "Kill a session (or pick one)"},
     {"command": "restart", "description": "Restart muxpost"},
     {"command": "upgrade", "description": "Update muxpost, then restart"},
     {"command": "help", "description": "Show what muxpost can do"},
