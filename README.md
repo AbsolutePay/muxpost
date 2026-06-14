@@ -25,48 +25,56 @@ A tiny Telegram bot that controls all your `claude-*` tmux sessions from chat.
 
 ## Install
 
-One command sets up a `muxpost` command on your PATH and runs the interactive
-setup. First create a bot with [@BotFather](https://t.me/BotFather) (copy the
-token) and get your numeric id from [@userinfobot](https://t.me/userinfobot).
+The installer clones muxpost from GitHub, puts a `muxpost` command on your PATH,
+and leaves configuration to `muxpost init`. Then:
 
-**Linux / macOS:**
+```
+muxpost init      # configure: bot token, your user id, project root
+muxpost           # run it   (or: muxpost start  for the background)
+```
+
+**Linux / macOS / WSL:**
 
 ```bash
-./install.sh              # install command + run setup
-./install.sh --service    # also auto-start (systemd user unit / launchd agent)
-./install.sh --uninstall  # remove command + service
+curl -fsSL https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.sh | bash
+# add an auto-start service:        ... | bash -s -- --service
 ```
 
-**WSL:** run `install.sh` inside your WSL distro. `--service` auto-detects WSL:
-if systemd is enabled (`/etc/wsl.conf` `[boot] systemd=true`) it uses a systemd
-user unit; otherwise it adds a guarded autostart line to your `~/.bashrc` that
-launches muxpost in the background once per shell (logs to `muxpost.log`). To
-start it without opening a shell, the installer also prints a Windows Task
-Scheduler command you can add at logon.
-
-**Windows (PowerShell):** muxpost shells out to `tmux`, which lives in WSL — so
-the bot itself usually runs inside WSL (use `install.sh` there). On native
-Windows the installer still wires up the command and config:
+**Windows (PowerShell):**
 
 ```powershell
-./install.ps1             # install command + run setup
-./install.ps1 -Service    # auto-start as a logon scheduled task
-./install.ps1 -Uninstall
+irm https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.ps1 | iex
 ```
 
-The installer only adds a small launcher to a user bin dir
-(`~/.local/bin` / `%LOCALAPPDATA%\muxpost\bin`); the code stays in this folder.
+> The one-liners need the repo to be **public**. While it's private, clone first
+> (`gh repo clone AbsolutePay/muxpost && cd muxpost && ./install.sh`) — the
+> installer detects it's already a checkout and skips the clone.
+
+Before running `muxpost init`, create a bot with
+[@BotFather](https://t.me/BotFather) (copy the token) and get your numeric id
+from [@userinfobot](https://t.me/userinfobot).
+
+The installer clones to `~/.local/share/muxpost` (override with `MUXPOST_HOME`)
+and adds a launcher to a user bin dir (`~/.local/bin` /
+`%LOCALAPPDATA%\muxpost\bin`). Re-running it updates the clone. Remove with
+`--service`'s counterpart: `<clone>/install.sh --uninstall` (or `-Uninstall`).
+
+**WSL note:** `--service` auto-detects WSL — with systemd enabled
+(`/etc/wsl.conf` `[boot] systemd=true`) it uses a systemd user unit; otherwise it
+adds a guarded autostart line to `~/.bashrc` and prints a Windows Task Scheduler
+command for logon start. On native Windows the bot needs `tmux`, which lives in
+WSL, so run the bot inside WSL (`install.sh` there).
 
 ## Manual setup
 
-If you'd rather not use the installer:
+If you'd rather not use the installer, clone the repo and:
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
 2. Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
 3. Configure. Easiest is the interactive init, which also picks your project root:
 
    ```bash
-   python3 setup.py        # prompts for token, user id, and project root
+   python3 setup.py        # or: muxpost init  — prompts for token, user id, project root
    ```
 
    Or do it by hand (file or env vars):

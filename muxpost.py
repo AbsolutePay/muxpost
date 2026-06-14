@@ -808,7 +808,7 @@ usage: muxpost <command>
   restart    restart the running bot in place (or start it)
   upgrade    git pull the latest, then restart the running bot
   status     show version and whether the bot is running
-  setup      run the interactive configuration
+  init       configure muxpost (token, user id, project root)
   doctor     run the preflight health check
   help       show this message
 """
@@ -889,7 +889,7 @@ def cli():
         cli_upgrade()
     elif cmd == "status":
         cli_status()
-    elif cmd == "setup":
+    elif cmd in ("init", "setup"):
         subprocess.run([sys.executable, os.path.join(_HERE, "setup.py")])
     elif cmd == "doctor":
         sys.exit(subprocess.run([sys.executable, os.path.join(_HERE, "doctor.py")]).returncode)

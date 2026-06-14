@@ -3,28 +3,32 @@
   muxpost installer for Windows (PowerShell).
 
 .DESCRIPTION
-  Installs a `muxpost` command on your PATH, runs the interactive setup, and
-  can register an auto-start scheduled task. muxpost shells out to `tmux`,
-  which on Windows lives inside WSL — so the bot itself usually runs in WSL
-  (use install.sh there). This installer still wires up the command + config.
+  Clones muxpost from GitHub (if not run from a checkout), installs a `muxpost`
+  command on your PATH, and can register an auto-start scheduled task. After
+  installing, configure with `muxpost init`. muxpost shells out to `tmux`, which
+  on Windows lives inside WSL — so the bot itself usually runs in WSL (use
+  install.sh there); this still wires up the command and config.
 
 .EXAMPLE
+  # one-line install (works once the repo is public):
+  irm https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.ps1 | iex
+
   ./install.ps1
   ./install.ps1 -Service
-  ./install.ps1 -NoSetup
   ./install.ps1 -Uninstall
 #>
 param(
   [switch]$Service,
-  [switch]$NoSetup,
   [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$BinDir    = Join-Path $env:LOCALAPPDATA "muxpost\bin"
-$Launcher  = Join-Path $BinDir "muxpost.cmd"
-$TaskName  = "muxpost"
+$RepoUrl    = if ($env:MUXPOST_REPO) { $env:MUXPOST_REPO } else { "https://github.com/AbsolutePay/muxpost.git" }
+$InstallDir = if ($env:MUXPOST_HOME) { $env:MUXPOST_HOME } else { Join-Path $env:LOCALAPPDATA "muxpost\src" }
+$ScriptDir  = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { $null }
+$BinDir     = Join-Path $env:LOCALAPPDATA "muxpost\bin"
+$Launcher   = Join-Path $BinDir "muxpost.cmd"
+$TaskName   = "muxpost"
 
 function Ok($m)   { Write-Host "[+] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[!] $m" -ForegroundColor Yellow }
@@ -58,6 +62,21 @@ if ($Uninstall) {
   exit 0
 }
 
+# obtain the project (clone from GitHub when not run from a checkout)
+if (-not ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "muxpost.py")))) {
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "git is required to install muxpost." }
+  if (Test-Path (Join-Path $InstallDir ".git")) {
+    Write-Host "Updating muxpost in $InstallDir" -ForegroundColor Cyan
+    git -C $InstallDir pull --ff-only -q
+  } else {
+    Write-Host "Cloning $RepoUrl into $InstallDir" -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) | Out-Null
+    git clone --depth 1 -q $RepoUrl $InstallDir
+    if ($LASTEXITCODE -ne 0) { Die "clone failed — is the repo public, or have you run: gh auth setup-git ?" }
+  }
+  $ScriptDir = $InstallDir
+}
+
 Write-Host "Installing muxpost from $ScriptDir" -ForegroundColor Cyan
 
 $Python = Find-Python
@@ -86,18 +105,13 @@ if ($userPath.Split(";") -notcontains $BinDir) {
   Warn "Added $BinDir to your PATH. Open a new terminal for `muxpost` to resolve."
 }
 
-# setup
-if (-not $NoSetup) {
-  if (Test-Path (Join-Path $ScriptDir "config.json")) {
-    Ok "config.json already exists — skipping setup (run: $Python setup.py to change it)"
-  } else {
-    Write-Host "Running setup..." -ForegroundColor Cyan
-    & $Python (Join-Path $ScriptDir "setup.py")
-  }
-}
+# config status (configuration is done separately via `muxpost init`)
+$HasConfig = Test-Path (Join-Path $ScriptDir "config.json")
+if ($HasConfig) { Ok "config.json already present" }
 
 # auto-start scheduled task
 if ($Service) {
+  if (-not $HasConfig) { Warn "no config yet — run 'muxpost init' before the task can start." }
   Write-Host "Registering auto-start task..." -ForegroundColor Cyan
   $action  = "`"$Python`" `"$ScriptDir\muxpost.py`""
   schtasks /Create /TN $TaskName /TR $action /SC ONLOGON /RL LIMITED /F | Out-Null
@@ -107,7 +121,10 @@ if ($Service) {
 
 Write-Host ""
 Ok "muxpost installed."
-Write-Host "Verify : $Python doctor.py"
-if ($Service) { Write-Host "Running as a logon task." }
-else { Write-Host "Start  : muxpost   (or: $Python muxpost.py)" }
-Write-Host "Remove : ./install.ps1 -Uninstall"
+if ($HasConfig) { Write-Host "Next   : muxpost          (run)" }
+else {
+  Write-Host "Next   : muxpost init     (configure token, user id, project root)"
+  Write-Host "Then   : muxpost          (run)"
+}
+Write-Host "Check  : muxpost doctor"
+Write-Host "Remove : powershell $ScriptDir\install.ps1 -Uninstall"

@@ -30,7 +30,8 @@ def ask(prompt, default=""):
     try:
         val = input(f"{prompt}{suffix}: ").strip()
     except EOFError:
-        val = ""
+        print("\nNo interactive input — run `muxpost init` in a terminal.", file=sys.stderr)
+        sys.exit(1)
     return val or default
 
 

@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 #
-# muxpost installer for Linux and macOS.
+# muxpost installer — Linux, macOS, and WSL.
 #
-#   ./install.sh                install the `muxpost` command + run setup
-#   ./install.sh --service      also register an auto-start service
-#   ./install.sh --no-setup     skip the interactive setup step
-#   ./install.sh --uninstall    remove the command and any service
+# One-line install (works once the repo is public):
+#   curl -fsSL https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.sh | bash
+#   # pass flags after --, e.g.  ... | bash -s -- --service
 #
-# Pure POSIX/bash, no dependencies beyond python3 and (for running) tmux.
+# From a checkout:
+#   ./install.sh              install the `muxpost` command
+#   ./install.sh --service    also register an auto-start service
+#   ./install.sh --uninstall  remove the command and any service
+#
+# After installing, configure with:  muxpost init
+# Needs git + python3 (and tmux at runtime).
 
 set -eu
 
@@ -47,14 +52,13 @@ remove_profile_block() {
 }
 
 # --- flags -----------------------------------------------------------------
-DO_SERVICE=0; DO_SETUP=1; DO_UNINSTALL=0
+DO_SERVICE=0; DO_UNINSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --service)   DO_SERVICE=1 ;;
-    --no-setup)  DO_SETUP=0 ;;
     --uninstall) DO_UNINSTALL=1 ;;
     -h|--help)
-      sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $arg (try --help)" ;;
   esac
 done
@@ -96,6 +100,23 @@ uninstall() {
 
 [ "$DO_UNINSTALL" = "1" ] && uninstall
 
+# --- obtain the project (clone from GitHub when not run from a checkout) ----
+REPO_URL="${MUXPOST_REPO:-https://github.com/AbsolutePay/muxpost.git}"
+INSTALL_DIR="${MUXPOST_HOME:-$HOME/.local/share/muxpost}"
+if [ ! -f "$SCRIPT_DIR/muxpost.py" ]; then
+  command -v git >/dev/null 2>&1 || die "git is required to install muxpost."
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    info "Updating muxpost in $INSTALL_DIR"
+    git -C "$INSTALL_DIR" pull --ff-only -q || warn "update failed; using existing copy"
+  else
+    info "Cloning $REPO_URL into $INSTALL_DIR"
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone --depth 1 -q "$REPO_URL" "$INSTALL_DIR" \
+      || die "clone failed — is the repo public, or have you run: gh auth setup-git ?"
+  fi
+  SCRIPT_DIR="$INSTALL_DIR"
+fi
+
 # --- install ---------------------------------------------------------------
 info "${B}Installing muxpost${N} from $SCRIPT_DIR"
 [ -n "$PYTHON" ] || die "Python 3.8+ not found. Install python3 and re-run."
@@ -122,15 +143,10 @@ case ":$PATH:" in
      printf '      export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
 esac
 
-# interactive setup
-if [ "$DO_SETUP" = "1" ]; then
-  if [ -f "$SCRIPT_DIR/config.json" ]; then
-    ok "config.json already exists — skipping setup (edit it or run: $PYTHON setup.py)"
-  else
-    info "${B}Running setup…${N}"
-    "$PYTHON" "$SCRIPT_DIR/setup.py" || warn "setup did not finish; run it later with: $PYTHON setup.py"
-  fi
-fi
+# config status (configuration is done separately via `muxpost init`)
+HAS_CONFIG=0
+[ -f "$SCRIPT_DIR/config.json" ] && HAS_CONFIG=1
+[ "$HAS_CONFIG" = "1" ] && ok "config.json already present"
 
 # optional auto-start service
 install_service_profile() {
@@ -212,6 +228,7 @@ EOF
 }
 
 if [ "$DO_SERVICE" = "1" ]; then
+  [ "$HAS_CONFIG" = "1" ] || warn "no config yet — run 'muxpost init' before the service can start."
   info "${B}Registering auto-start service…${N}"
   case "$OS" in
     Linux)  install_service_linux ;;
@@ -222,10 +239,11 @@ fi
 
 info ""
 ok "${B}muxpost installed.${N}"
-info "Verify : ${B}muxpost.py${N} via  $PYTHON doctor.py"
-if [ "$DO_SERVICE" = "1" ]; then
-  info "Running as a background service."
+if [ "$HAS_CONFIG" = "1" ]; then
+  info "Next   : ${B}muxpost${N} to run   (or ${B}muxpost start${N} for background)"
 else
-  info "Start  : ${B}muxpost${N}   (or: $PYTHON muxpost.py)"
+  info "Next   : ${B}muxpost init${N}    to configure (token, user id, project root)"
+  info "Then   : ${B}muxpost${N}         to run   (or ${B}muxpost start${N})"
 fi
-info "Remove : ./install.sh --uninstall"
+info "Check  : muxpost doctor"
+info "Remove : $SCRIPT_DIR/install.sh --uninstall"
