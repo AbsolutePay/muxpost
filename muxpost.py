@@ -94,6 +94,7 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "muxpost")
 PIDFILE = os.path.join(STATE_DIR, "muxpost.pid")
 NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
+LAST_SENT_FILE = os.path.join(STATE_DIR, "last_sent.json")
 SNAPSHOT_FILE = os.path.join(STATE_DIR, "sessions_snapshot.json")
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
@@ -103,6 +104,9 @@ RESTART_SIG = getattr(signal, "SIGHUP", None)
 
 # session name -> {"hash": str|None, "count": int, "reported": bool}
 STATE = {}
+# session name -> epoch seconds we last relayed a message to it (sort key for
+# the session pickers: most-recently-worked-on first)
+LAST_SENT = {}
 # message_id -> full session name (replying to it relays input to that session)
 MSG_SESSION = {}
 # chat_id -> pending text awaiting a "which session?" button choice
@@ -205,10 +209,12 @@ def list_sessions():
 
 
 def sessions_by_recency():
-    """Matching sessions ordered by last activity (most recent first).
+    """Matching sessions ordered by when you last sent them a message.
 
-    tmux's session_activity updates both when the session produces output and
-    when we send keys, so the project you're actively working on floats to top.
+    The project you most recently worked on (replied to / sent a queued message
+    / picked a menu option) floats to the top. Sessions you've never messaged
+    sort below those you have, ordered among themselves by tmux's
+    session_activity so the list still stays meaningful for fresh sessions.
     """
     res = _tmux(["list-sessions", "-F", "#{session_activity}\t#{session_name}"])
     if res.returncode != 0:
@@ -222,9 +228,10 @@ def sessions_by_recency():
             act = int(act)
         except ValueError:
             act = 0
-        rows.append((act, name))
-    rows.sort(key=lambda r: (-r[0], r[1]))  # newest first, name as tiebreak
-    return [name for _, name in rows]
+        rows.append((LAST_SENT.get(name, 0), act, name))
+    # last-sent first, then tmux activity, then name — all most-recent-first.
+    rows.sort(key=lambda r: (-r[0], -r[1], r[2]))
+    return [name for _, _, name in rows]
 
 
 def capture_pane(session):
@@ -241,13 +248,18 @@ def send_input(session, text):
     if r1.returncode != 0:
         return False
     r2 = _tmux(["send-keys", "-t", session, "Enter"])
+    if r2.returncode == 0:
+        mark_sent(session)
     return r2.returncode == 0
 
 
 def send_queued(session):
     """Accept + submit a queued suggestion: Right (accept) then Enter (send)."""
     _tmux(["send-keys", "-t", session, "Right"])
-    return _tmux(["send-keys", "-t", session, "Enter"]).returncode == 0
+    ok = _tmux(["send-keys", "-t", session, "Enter"]).returncode == 0
+    if ok:
+        mark_sent(session)
+    return ok
 
 
 def session_exists(full):
@@ -574,6 +586,30 @@ def save_state():
         pass
 
 
+def load_last_sent():
+    """Restore the per-session 'last message sent' timestamps."""
+    try:
+        with open(LAST_SENT_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            LAST_SENT.update({k: int(v) for k, v in data.items()})
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def mark_sent(session):
+    """Record that we just relayed a message to `session` and persist it."""
+    LAST_SENT[session] = int(time.time())
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = LAST_SENT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(LAST_SENT, fh)
+        os.replace(tmp, LAST_SENT_FILE)
+    except OSError:
+        pass
+
+
 def _session_field(session, fmt):
     r = _tmux(["display-message", "-p", "-t", session, fmt])
     return r.stdout.strip() if r.returncode == 0 else ""
@@ -836,6 +872,8 @@ def handle_callback(cq):
             edit(chat_id, message_id, reply_markup=None)
             return
         ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
+        if ok:
+            mark_sent(full)
         answer(cq["id"], f"Selected {val} ✓" if ok else "Failed")
         edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
             {"text": f"✅ Selected option {val}" if ok else "⚠️ Failed to send",
@@ -1052,6 +1090,7 @@ def main():
           f"reporting after {IDLE_TICKS} idle ticks.")
     register_commands()
     load_state()  # restore report flags so a restart doesn't re-notify
+    load_last_sent()  # restore picker ordering (last message sent per session)
 
     # record our PID and install an in-place restart on SIGHUP
     try:
