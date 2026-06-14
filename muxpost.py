@@ -735,6 +735,24 @@ def restart_inplace():
     os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), "run"])
 
 
+# Commands shown in Telegram's command menu / autocomplete (via setMyCommands).
+BOT_COMMANDS = [
+    {"command": "status", "description": "Inspect a session (or pick one)"},
+    {"command": "new", "description": "Start a new claude session"},
+    {"command": "restart", "description": "Restart muxpost"},
+    {"command": "upgrade", "description": "Update muxpost, then restart"},
+    {"command": "help", "description": "Show what muxpost can do"},
+]
+
+
+def register_commands():
+    res = api("setMyCommands", commands=BOT_COMMANDS)
+    if res.get("ok"):
+        print(f"registered {len(BOT_COMMANDS)} bot commands")
+    else:
+        print(f"[warn] setMyCommands failed: {res}", file=sys.stderr)
+
+
 def main():
     require_config()
     me = api("getMe")
@@ -744,6 +762,7 @@ def main():
     print(f"Started as @{me['result'].get('username')} on {version()}. "
           f"Watching '{PREFIX}*' every {INTERVAL}s, "
           f"reporting after {IDLE_TICKS} idle ticks.")
+    register_commands()
 
     # record our PID and install an in-place restart on SIGHUP
     try:
