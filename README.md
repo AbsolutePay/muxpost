@@ -171,3 +171,7 @@ Only the configured `user_id` can use the bot; everyone else is ignored.
   (older report messages become un-repliable, but `/status` regenerates fresh ones).
 - On Windows, run it inside the same environment where `tmux` is available
   (e.g. WSL), since it shells out to the `tmux` binary.
+
+## License
+
+[MIT](LICENSE) © 2026 Gilang Ramadhan &lt;hai@0wx.dev&gt;
