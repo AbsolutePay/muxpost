@@ -13,8 +13,22 @@ import json
 import os
 import subprocess
 import sys
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def bot_username(token):
+    """Return the bot's @username via getMe, or None if the token is bad."""
+    try:
+        url = f"https://api.telegram.org/bot{token}/getMe"
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = json.load(resp)
+        if data.get("ok"):
+            return data["result"].get("username")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 CFG_PATH = os.path.join(HERE, "config.json")
 
 cfg = {}
@@ -41,8 +55,14 @@ print("-------------\n")
 
 # --- bot token -------------------------------------------------------------
 cur_token = cfg.get("bot_token", "")
-hint = f" (current: {cur_token[:8]}…, blank = keep)" if cur_token else ""
+hint = " (configured — leave blank to keep)" if cur_token else ""
 token = ask(f"Bot token from @BotFather{hint}", cur_token)
+if token:
+    uname = bot_username(token)
+    if uname:
+        print(f"  ✓ verified — bot is @{uname}")
+    else:
+        print("  ⚠️  couldn't verify this token (bad token or no network)")
 
 # --- user id ---------------------------------------------------------------
 cur_uid = str(cfg.get("user_id", "") or "")
