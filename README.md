@@ -19,6 +19,10 @@ A tiny Telegram bot that controls all your `claude-*` tmux sessions from chat.
   one directly.
 - `/restart` restarts the bot in place; `/upgrade` does a `git pull` then
   restarts onto the new version and pings you when it's back.
+- Optionally **brings your sessions back**: every 5 minutes it snapshots each
+  live `claude-*` session (name + working dir), and on startup (after a reboot)
+  recreates any that are missing — relaunching `claude` with resume in the saved
+  directory. Toggle this in `muxpost init`.
 - Send **plain text** (no reply) and the bot asks which session to deliver it to.
 - The `claude-` prefix is hidden in the UI for readability.
 - Pane contents are shown in an **expandable blockquote**.
@@ -110,8 +114,21 @@ muxpost restart    # restart in place (keeps the same PID)
 muxpost upgrade    # git pull --ff-only, then restart onto the new version
 muxpost status     # show version (git short SHA) and whether it's running
 muxpost doctor     # run the preflight check
-muxpost init       # re-run configuration (token, user id, root, autostart)
+muxpost init       # re-run configuration (token, user id, root, autostart, restore)
+muxpost snapshot   # record current claude-* sessions now
+muxpost restore    # recreate snapshot sessions that aren't running
 ```
+
+### Bringing sessions back
+
+If you enable **restore** in `muxpost init`, the bot keeps a snapshot of your live
+`claude-*` sessions at `~/.cache/muxpost/sessions_snapshot.json` (name + working
+directory + pane command), refreshed every 5 minutes. When muxpost starts and
+finds a snapshotted session no longer running — typically after a reboot — it
+recreates it with `tmux new-session` in the saved directory and relaunches
+`claude` (resuming the latest conversation if that directory has history). Pair
+it with **autostart** so a reboot brings everything back on its own. You can also
+run `muxpost restore` by hand any time.
 
 `restart` and `upgrade` work the same from chat: **`/restart`** and **`/upgrade`**.
 Both re-exec the process in place via `os.execv`, so they behave identically
@@ -139,6 +156,8 @@ script before launching the bot.
 | `user_id`    | `TG_USER_ID`   | —          | allowed Telegram user id (required)  |
 | `project_root`| `TG_PROJECT_ROOT`| —      | root folder `/new` creates sessions in|
 | `autostart`  | —              | `false`    | whether `init` enabled background/boot start|
+| `restore_sessions`| `TG_RESTORE_SESSIONS`| `false` | recreate snapshotted sessions on startup|
+| `snapshot_interval`| `TG_SNAPSHOT_INTERVAL`| `300` | seconds between session snapshots|
 | `prefix`     | `TG_PREFIX`    | `claude-`  | session name prefix to watch         |
 | `interval`   | `TG_INTERVAL`  | `5`        | seconds between capture ticks        |
 | `idle_ticks` | `TG_IDLE_TICKS`| `3`        | unchanged ticks before an idle report|

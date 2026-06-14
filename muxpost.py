@@ -66,6 +66,16 @@ PROJECT_ROOT = _conf("TG_PROJECT_ROOT", "project_root", "")
 if PROJECT_ROOT:
     PROJECT_ROOT = os.path.abspath(os.path.expanduser(PROJECT_ROOT))
 
+
+def _as_bool(v):
+    return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+# Periodically snapshot live sessions; optionally restore them on startup
+# (e.g. after a reboot). Snapshot cadence mirrors a 5-minute external snapshot.
+RESTORE_SESSIONS = _as_bool(_conf("TG_RESTORE_SESSIONS", "restore_sessions", False))
+SNAPSHOT_INTERVAL = float(_conf("TG_SNAPSHOT_INTERVAL", "snapshot_interval", 300))
+
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 
@@ -84,6 +94,7 @@ STATE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "muxpost")
 PIDFILE = os.path.join(STATE_DIR, "muxpost.pid")
 NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
+SNAPSHOT_FILE = os.path.join(STATE_DIR, "sessions_snapshot.json")
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
 # --------------------------------------------------------------------------
@@ -407,6 +418,54 @@ def save_state():
         os.replace(tmp, STATE_FILE)
     except OSError:
         pass
+
+
+def _session_field(session, fmt):
+    r = _tmux(["display-message", "-p", "-t", session, fmt])
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def snapshot_sessions():
+    """Record live claude-* sessions (name + cwd + command) for later restore."""
+    sessions = []
+    for full in list_sessions():
+        sessions.append({
+            "name": full,
+            "path": _session_field(full, "#{pane_current_path}"),
+            "command": _session_field(full, "#{pane_current_command}"),
+        })
+    if not sessions:
+        return  # don't overwrite a good snapshot with an empty one
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = SNAPSHOT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"prefix": PREFIX, "count": len(sessions), "sessions": sessions}, fh)
+        os.replace(tmp, SNAPSHOT_FILE)
+    except OSError:
+        pass
+
+
+def restore_from_snapshot():
+    """Recreate snapshot sessions that aren't currently running; resume claude."""
+    try:
+        with open(SNAPSHOT_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    home = os.path.expanduser("~")
+    restored = 0
+    for s in data.get("sessions", []):
+        name = s.get("name")
+        if not name or session_exists(name):
+            continue
+        path = s.get("path") or home
+        workdir = path if os.path.isdir(path) else home
+        ok, info = launch_session(name, workdir)
+        if ok:
+            restored += 1
+            print(f"restored {name} in {workdir} ({info})")
+    return restored
 
 
 def monitor_tick():
@@ -830,8 +889,14 @@ def main():
 
     _flush_notify()  # tell the user we're back, if a restart queued it
 
+    if RESTORE_SESSIONS:
+        n = restore_from_snapshot()
+        if n:
+            print(f"restored {n} session(s) from snapshot")
+
     offset = None
     last_tick = 0.0
+    last_snapshot = 0.0
     while True:
         now = time.monotonic()
         if now - last_tick >= INTERVAL:
@@ -840,6 +905,12 @@ def main():
                 monitor_tick()
             except Exception as exc:  # noqa: BLE001
                 print(f"[monitor] error: {exc}", file=sys.stderr)
+        if now - last_snapshot >= SNAPSHOT_INTERVAL:
+            last_snapshot = now
+            try:
+                snapshot_sessions()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[snapshot] error: {exc}", file=sys.stderr)
 
         # Long-poll only until the next tick is due (keeps ticks on time).
         wait = max(1, int(INTERVAL - (time.monotonic() - last_tick)))
@@ -872,6 +943,8 @@ usage: muxpost <command>
   restart    restart the running bot in place (or start it)
   upgrade    git pull the latest, then restart the running bot
   status     show version and whether the bot is running
+  restore    recreate snapshot sessions that aren't running (resume claude)
+  snapshot   record current claude-* sessions for later restore
   init       configure muxpost (token, user id, project root)
   doctor     run the preflight health check
   help       show this message
@@ -953,6 +1026,13 @@ def cli():
         cli_upgrade()
     elif cmd == "status":
         cli_status()
+    elif cmd == "restore":
+        n = restore_from_snapshot()
+        print(f"restored {n} session(s)" if n else "nothing to restore "
+              "(no snapshot, or all sessions already running)")
+    elif cmd == "snapshot":
+        snapshot_sessions()
+        print(f"snapshot written to {SNAPSHOT_FILE}")
     elif cmd in ("init", "setup"):
         subprocess.run([sys.executable, os.path.join(_HERE, "setup.py")])
     elif cmd == "doctor":

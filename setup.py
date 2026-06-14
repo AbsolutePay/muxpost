@@ -99,12 +99,20 @@ default_auto = "y" if cur_auto else "n"
 auto_ans = ask("Start muxpost automatically (background + on boot)? (y/N)", default_auto)
 autostart = auto_ans.lower().startswith("y")
 
+# --- restore sessions ------------------------------------------------------
+cur_restore = bool(cfg.get("restore_sessions", False))
+default_restore = "y" if cur_restore else "n"
+restore_ans = ask("Bring tmux sessions back automatically on startup "
+                  "(after a reboot)? (y/N)", default_restore)
+restore_sessions = restore_ans.lower().startswith("y")
+
 # --- write -----------------------------------------------------------------
 cfg.update({
     "bot_token": token,
     "user_id": uid,
     "project_root": root,
     "autostart": autostart,
+    "restore_sessions": restore_sessions,
 })
 cfg.setdefault("prefix", "claude-")
 cfg.setdefault("interval", 5)
@@ -119,6 +127,7 @@ print(f"\nWrote {CFG_PATH}")
 print(f"  prefix       {cfg['prefix']}")
 print(f"  project_root {cfg['project_root']}")
 print(f"  autostart    {autostart}")
+print(f"  restore      {restore_sessions}")
 if not token:
     print("\n⚠️  No bot token set — add it before running the bot.")
 

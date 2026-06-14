@@ -3,6 +3,7 @@
   "user_id": 0,
   "project_root": "/home/you/projects",
   "autostart": false,
+  "restore_sessions": false,
   "prefix": "claude-",
   "interval": 5,
   "idle_ticks": 3,
