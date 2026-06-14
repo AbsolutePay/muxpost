@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -65,13 +66,22 @@ if PROJECT_ROOT:
 
 API = f"https://api.telegram.org/bot{TOKEN}"
 
-if not TOKEN or not USER_ID:
-    print(
-        "Missing config. Set TG_BOT_TOKEN and TG_USER_ID via environment "
-        "or config.json (see config.example.json).",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+
+def require_config():
+    if not TOKEN or not USER_ID:
+        print(
+            "Missing config. Set TG_BOT_TOKEN and TG_USER_ID via environment "
+            "or config.json (run: muxpost setup).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# Paths for process management (pidfile) and post-restart notifications.
+STATE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "muxpost")
+PIDFILE = os.path.join(STATE_DIR, "muxpost.pid")
+NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
+RESTART_SIG = getattr(signal, "SIGHUP", None)
 
 # --------------------------------------------------------------------------
 # In-memory state
@@ -450,9 +460,31 @@ def handle_message(msg):
             "• <code>/new &lt;name&gt; [path]</code> — start one directly.\n"
             "• <code>/status</code> — pick a session to inspect.\n"
             "• <code>/status &lt;name&gt;</code> — inspect one directly.\n"
+            "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
             "• Send plain text — I'll ask which session to send it to.",
         )
         return
+
+    if text.startswith("/restart"):
+        send(chat_id, f"♻️ Restarting on <code>{html.escape(version())}</code>…")
+        write_notify(chat_id, "✅ muxpost is back up.")
+        restart_inplace()
+        return  # unreached (process is replaced)
+
+    if text.startswith("/upgrade"):
+        send(chat_id, "⬆️ Pulling latest…")
+        ok, out = git_pull()
+        body = f"<blockquote expandable>{html.escape(out[-1500:])}</blockquote>" if out else ""
+        if not ok:
+            send(chat_id, f"⚠️ Upgrade failed.\n{body}")
+            return
+        if "up to date" in out.lower() or "up-to-date" in out.lower():
+            send(chat_id, f"✅ Already up to date on <code>{html.escape(version())}</code>.\n{body}")
+            return
+        send(chat_id, f"✅ Updated → <code>{html.escape(version())}</code>. Restarting…\n{body}")
+        write_notify(chat_id, f"✅ muxpost back up on <code>{html.escape(version())}</code>.")
+        restart_inplace()
+        return  # unreached
 
     if text.startswith("/new"):
         if not PROJECT_ROOT:
@@ -639,14 +671,100 @@ def dispatch(update):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Process management / restart / upgrade
+# --------------------------------------------------------------------------
+
+
+def version():
+    r = subprocess.run(["git", "-C", _HERE, "rev-parse", "--short", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else "unknown"
+
+
+def git_pull():
+    r = subprocess.run(["git", "-C", _HERE, "pull", "--ff-only"],
+                       capture_output=True, text=True)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def _read_pid():
+    try:
+        with open(PIDFILE, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def running_pid():
+    """PID of a live muxpost instance, or None."""
+    pid = _read_pid()
+    if pid:
+        try:
+            os.kill(pid, 0)
+            return pid
+        except OSError:
+            return None
+    return None
+
+
+def write_notify(chat_id, text):
+    """Queue a message to be sent once the bot comes back after a restart."""
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(NOTIFY_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"chat_id": chat_id, "text": text}, fh)
+    except OSError:
+        pass
+
+
+def _flush_notify():
+    try:
+        with open(NOTIFY_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        os.remove(NOTIFY_FILE)
+        send(data["chat_id"], data["text"])
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def restart_inplace():
+    """Replace this process with a fresh one (same PID; reloads code + config)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), "run"])
+
+
 def main():
+    require_config()
     me = api("getMe")
     if not me.get("ok"):
         print("Could not reach Telegram / bad token.", file=sys.stderr)
         sys.exit(1)
-    print(f"Started as @{me['result'].get('username')}. "
+    print(f"Started as @{me['result'].get('username')} on {version()}. "
           f"Watching '{PREFIX}*' every {INTERVAL}s, "
           f"reporting after {IDLE_TICKS} idle ticks.")
+
+    # record our PID and install an in-place restart on SIGHUP
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(PIDFILE, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        pass
+    if RESTART_SIG is not None:
+        signal.signal(RESTART_SIG, lambda *_: restart_inplace())
+
+    def _cleanup(*_):
+        try:
+            if _read_pid() == os.getpid():
+                os.remove(PIDFILE)
+        except OSError:
+            pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _cleanup)
+
+    _flush_notify()  # tell the user we're back, if a restart queued it
 
     offset = None
     last_tick = 0.0
@@ -676,8 +794,115 @@ def main():
             dispatch(update)
 
 
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+USAGE = """muxpost — Telegram controller for tmux sessions
+
+usage: muxpost <command>
+
+  run        run the bot in the foreground (default)
+  start      start the bot in the background
+  stop       stop the running bot
+  restart    restart the running bot in place (or start it)
+  upgrade    git pull the latest, then restart the running bot
+  status     show version and whether the bot is running
+  setup      run the interactive configuration
+  doctor     run the preflight health check
+  help       show this message
+"""
+
+
+def cli_start():
+    if running_pid():
+        print(f"already running (pid {running_pid()})")
+        return
+    require_config()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    logf = open(os.path.join(_HERE, "muxpost.log"), "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "run"],
+        stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    print(f"started in background (pid {proc.pid}); logs: {_HERE}/muxpost.log")
+
+
+def cli_stop():
+    pid = running_pid()
+    if not pid:
+        print("not running")
+        return
+    os.kill(pid, signal.SIGTERM)
+    print(f"stopped (pid {pid})")
+
+
+def cli_restart():
+    pid = running_pid()
+    if pid and RESTART_SIG is not None:
+        os.kill(pid, RESTART_SIG)
+        print(f"restart signal sent (pid {pid})")
+    elif pid:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(1)
+        cli_start()
+    else:
+        print("not running — starting")
+        cli_start()
+
+
+def cli_upgrade():
+    print("pulling latest…")
+    ok, out = git_pull()
+    print(out or ("(no output)" if ok else "pull failed"))
+    if not ok:
+        sys.exit(1)
+    pid = running_pid()
+    if pid and RESTART_SIG is not None:
+        os.kill(pid, RESTART_SIG)
+        print(f"reloaded running bot (pid {pid}) → {version()}")
+    elif pid:
+        cli_restart()
+        print(f"→ {version()}")
+    else:
+        print(f"now at {version()} (bot not running; start with: muxpost start)")
+
+
+def cli_status():
+    pid = running_pid()
+    print(f"muxpost {version()}  ({_HERE})")
+    print(f"running: yes (pid {pid})" if pid else "running: no")
+
+
+def cli():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd == "run":
+        main()
+    elif cmd == "start":
+        cli_start()
+    elif cmd == "stop":
+        cli_stop()
+    elif cmd == "restart":
+        cli_restart()
+    elif cmd == "upgrade":
+        cli_upgrade()
+    elif cmd == "status":
+        cli_status()
+    elif cmd == "setup":
+        subprocess.run([sys.executable, os.path.join(_HERE, "setup.py")])
+    elif cmd == "doctor":
+        sys.exit(subprocess.run([sys.executable, os.path.join(_HERE, "doctor.py")]).returncode)
+    elif cmd in ("help", "-h", "--help"):
+        print(USAGE)
+    else:
+        print(f"unknown command: {cmd}\n", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     try:
-        main()
+        cli()
     except KeyboardInterrupt:
         print("\nbye")

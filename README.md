@@ -17,6 +17,8 @@ A tiny Telegram bot that controls all your `claude-*` tmux sessions from chat.
   (`claude --continue`). `/new <name> [path]` does it directly.
 - `/status` shows paginated session buttons (5 per page); `/status <name>` shows
   one directly.
+- `/restart` restarts the bot in place; `/upgrade` does a `git pull` then
+  restarts onto the new version and pings you when it's back.
 - Send **plain text** (no reply) and the bot asks which session to deliver it to.
 - The `claude-` prefix is hidden in the UI for readability.
 - Pane contents are shown in an **expandable blockquote**.
@@ -88,6 +90,30 @@ If you'd rather not use the installer:
    ```
 
 Send `/start` to your bot to confirm it's alive.
+
+## Managing the bot
+
+After installing, the `muxpost` command manages the running bot:
+
+```bash
+muxpost            # run in the foreground (same as: muxpost run)
+muxpost start      # start in the background (logs to muxpost.log)
+muxpost stop       # stop the running bot
+muxpost restart    # restart in place (keeps the same PID)
+muxpost upgrade    # git pull --ff-only, then restart onto the new version
+muxpost status     # show version (git short SHA) and whether it's running
+muxpost doctor     # run the preflight check
+muxpost setup      # re-run interactive configuration
+```
+
+`restart` and `upgrade` work the same from chat: **`/restart`** and **`/upgrade`**.
+Both re-exec the process in place via `os.execv`, so they behave identically
+whether the bot runs under systemd, launchd, a WSL shell job, or by hand — the
+PID is preserved, so your service manager never notices. A restart clears
+in-memory state (older report messages become un-repliable; `/status` makes
+fresh ones), and after `/upgrade` the bot messages you once it's back on the new
+SHA. The CLI signals the running instance via a pidfile at
+`~/.cache/muxpost/muxpost.pid`.
 
 ## Doctor
 
