@@ -374,6 +374,13 @@ def status_text(full, pane, header_emoji="🖥"):
     )
 
 
+# Ghost/placeholder hints Claude renders inside an empty prompt — not real
+# queued messages, so detect_queue must ignore them (compared lowercased).
+QUEUE_PLACEHOLDERS = {
+    "press up to edit queued messages",
+}
+
+
 def detect_queue(pane):
     """Return a queued/suggested message sitting in the input prompt, or None.
 
@@ -394,6 +401,9 @@ def detect_queue(pane):
         st = line.strip()
         if st.startswith("❯"):
             queued = st[1:].strip()
+    if queued and queued.lower() in QUEUE_PLACEHOLDERS:
+        # Ghost/placeholder hint shown in an empty prompt, not a real message.
+        return None
     return queued or None
 
 
