@@ -221,6 +221,12 @@ def send_input(session, text):
     return r2.returncode == 0
 
 
+def send_queued(session):
+    """Accept + submit a queued suggestion: Right (accept) then Enter (send)."""
+    _tmux(["send-keys", "-t", session, "Right"])
+    return _tmux(["send-keys", "-t", session, "Enter"]).returncode == 0
+
+
 def session_exists(full):
     return _tmux(["has-session", "-t", full]).returncode == 0
 
@@ -281,15 +287,52 @@ MAX_LINES = 60
 MAX_CHARS = 3500
 
 
+def _is_divider(line):
+    """True for the box-drawing rules that frame Claude's input box."""
+    chars = [c for c in line if not c.isspace()]
+    return bool(chars) and all(0x2500 <= ord(c) <= 0x257F for c in chars)
+
+
+def clean_pane(text):
+    """Strip the TUI chrome that's common to every claude-* pane.
+
+    Removes the input-box borders, the empty prompt line, the bottom status
+    footer, and the '/clear to save … tokens' hint, and collapses blank runs —
+    leaving just the conversation. A non-empty prompt (a queued message) is kept.
+    """
+    out = []
+    blanks = 0
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        st = line.strip()
+        if _is_divider(line):
+            continue
+        if st.startswith("⏵⏵"):                       # "auto mode on … for agents"
+            continue
+        if "/clear to save" in st and st.endswith("tokens"):
+            continue
+        if st in ("❯", ">"):                           # empty input prompt
+            continue
+        if not st:
+            blanks += 1
+            if blanks > 1:
+                continue
+        else:
+            blanks = 0
+        out.append(line)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out)
+
+
 def render_pane(pane):
-    """Trim a capture to the last lines and wrap it in an expandable quote."""
+    """Clean the capture, trim to the last lines, wrap in an expandable quote."""
     if pane is None:
         return "<i>(could not capture pane)</i>"
-    lines = pane.rstrip("\n").split("\n")
-    # drop trailing blank lines
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines:
+    lines = clean_pane(pane).split("\n")
+    if not lines or not any(l.strip() for l in lines):
         return "<blockquote expandable><i>(empty)</i></blockquote>"
     if len(lines) > MAX_LINES:
         lines = lines[-MAX_LINES:]
@@ -306,6 +349,40 @@ def status_text(full, pane, header_emoji="🖥"):
         f"{render_pane(pane)}\n"
         f"<i>↩️ Reply to this message to send input.</i>"
     )
+
+
+def detect_queue(pane):
+    """Return a queued/suggested message sitting in the input prompt, or None.
+
+    Claude stages a recommended next message in the prompt (you'd press →/Tab
+    then Enter to send it). We take the text after the last '❯' prompt marker;
+    an empty prompt means nothing is queued.
+    """
+    if not pane:
+        return None
+    lines = pane.split("\n")
+    tail = "\n".join(lines[-6:])
+    # In a selection menu '❯' marks the highlighted option, not a text prompt.
+    if ("Esc to cancel" in tail or "to navigate" in tail
+            or "Enter to select" in tail or "Press Enter" in tail):
+        return None
+    queued = None
+    for line in lines:
+        st = line.strip()
+        if st.startswith("❯"):
+            queued = st[1:].strip()
+    return queued or None
+
+
+def queue_keyboard(full, pane):
+    """A 'send queued message' button if the session has one staged, else None."""
+    q = detect_queue(pane)
+    if not q:
+        return None
+    label = q if len(q) <= 40 else q[:39] + "…"
+    return {"inline_keyboard": [[
+        {"text": f"▶️ Send queued: {label}", "callback_data": f"q|{display_name(full)}"}
+    ]]}
 
 
 def build_keyboard(tag, sessions, page):
@@ -366,6 +443,7 @@ def do_new(chat_id, name, workdir, reply_to=None):
             chat_id,
             f"ℹ️ <b>{html.escape(display_name(full))}</b> is already running.\n"
             + status_text(full, pane),
+            reply_markup=queue_keyboard(full, pane),
             reply_to=reply_to,
         )
         if mid:
@@ -486,7 +564,8 @@ def monitor_tick():
             st["count"] += 1
             if st["count"] == IDLE_TICKS and not st["reported"]:
                 st["reported"] = True
-                mid = send(USER_ID, status_text(session, pane, "💤"))
+                mid = send(USER_ID, status_text(session, pane, "💤"),
+                           reply_markup=queue_keyboard(session, pane))
                 if mid:
                     MSG_SESSION[mid] = session
         else:
@@ -626,7 +705,8 @@ def handle_message(msg):
                 send(chat_id, f"No session named <b>{html.escape(disp)}</b>.")
                 return
             pane = capture_pane(full)
-            mid = send(chat_id, status_text(full, pane))
+            mid = send(chat_id, status_text(full, pane),
+                       reply_markup=queue_keyboard(full, pane))
             if mid:
                 MSG_SESSION[mid] = full
         else:
@@ -657,6 +737,20 @@ def handle_callback(cq):
         return
     tag, kind = parts[0], parts[1]
     val = parts[2] if len(parts) > 2 else ""
+
+    # Send a queued/suggested message Claude staged in the prompt.
+    if tag == "q":
+        full = full_name(kind)
+        if not session_exists(full):
+            answer(cq["id"], "Session is gone")
+            edit(chat_id, message_id, reply_markup=None)
+            return
+        ok = send_queued(full)
+        answer(cq["id"], "Sent ✓" if ok else "Failed")
+        edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
+            {"text": "✅ Queued message sent" if ok else "⚠️ Failed to send",
+             "callback_data": "noop"}]]})
+        return
 
     # New-session / folder picker flow.
     if tag == "nw":
@@ -733,7 +827,8 @@ def handle_callback(cq):
 
         if tag == "st":
             pane = capture_pane(full)
-            edit(chat_id, message_id, text=status_text(full, pane))
+            edit(chat_id, message_id, text=status_text(full, pane),
+                 reply_markup=queue_keyboard(full, pane))
             MSG_SESSION[message_id] = full
             answer(cq["id"], "Reply to that message to type into it.")
             return
