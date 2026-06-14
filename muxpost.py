@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""
+muxpost — messaging for your terminal multiplexer.
+
+A zero-dependency Telegram bot that watches every tmux session whose name
+starts with a prefix (default "claude-"), reports when a session goes idle,
+and relays your Telegram replies straight into that session via tmux send-keys.
+
+Only the Python standard library is used, so it runs on Linux / macOS /
+Windows wherever Python 3.8+ and tmux are available.
+
+Configure via environment variables or a config.json next to this file:
+    TG_BOT_TOKEN   Telegram bot token (from @BotFather)
+    TG_USER_ID     numeric Telegram user id allowed to use the bot
+    TG_PREFIX      session prefix to watch         (default "claude-")
+    TG_INTERVAL    seconds between capture ticks    (default 5)
+    TG_IDLE_TICKS  unchanged ticks before reporting (default 3)
+    TG_PAGE_SIZE   sessions per selection page       (default 5)
+"""
+
+import html
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CFG = {}
+_cfg_path = os.path.join(_HERE, "config.json")
+if os.path.exists(_cfg_path):
+    try:
+        with open(_cfg_path, "r", encoding="utf-8") as fh:
+            _CFG = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not read config.json: {exc}", file=sys.stderr)
+
+
+def _conf(env, key, default=None):
+    val = os.environ.get(env)
+    if val is not None and val != "":
+        return val
+    if key in _CFG and _CFG[key] not in (None, ""):
+        return _CFG[key]
+    return default
+
+
+TOKEN = _conf("TG_BOT_TOKEN", "bot_token")
+USER_ID = int(_conf("TG_USER_ID", "user_id", 0) or 0)
+PREFIX = _conf("TG_PREFIX", "prefix", "claude-")
+INTERVAL = float(_conf("TG_INTERVAL", "interval", 5))
+IDLE_TICKS = int(_conf("TG_IDLE_TICKS", "idle_ticks", 3))
+PAGE_SIZE = int(_conf("TG_PAGE_SIZE", "page_size", 5))
+PROJECT_ROOT = _conf("TG_PROJECT_ROOT", "project_root", "")
+if PROJECT_ROOT:
+    PROJECT_ROOT = os.path.abspath(os.path.expanduser(PROJECT_ROOT))
+
+API = f"https://api.telegram.org/bot{TOKEN}"
+
+if not TOKEN or not USER_ID:
+    print(
+        "Missing config. Set TG_BOT_TOKEN and TG_USER_ID via environment "
+        "or config.json (see config.example.json).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+# --------------------------------------------------------------------------
+# In-memory state
+# --------------------------------------------------------------------------
+
+# session name -> {"hash": str|None, "count": int, "reported": bool}
+STATE = {}
+# message_id -> full session name (replying to it relays input to that session)
+MSG_SESSION = {}
+# chat_id -> pending text awaiting a "which session?" button choice
+PENDING = {}
+# chat_id -> True while we wait for the user to type a new folder name
+NEW_DIR_WAIT = {}
+# chat_id -> {"name", "workdir"} awaiting a create-folder confirmation
+PENDING_NEW = {}
+
+# --------------------------------------------------------------------------
+# Telegram API helpers
+# --------------------------------------------------------------------------
+
+
+def api(method, _timeout=20, **params):
+    """Call a Telegram Bot API method. dict/list params are JSON-encoded."""
+    data = {}
+    for key, val in params.items():
+        if val is None:
+            continue
+        data[key] = json.dumps(val) if isinstance(val, (dict, list)) else val
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(f"{API}/{method}", data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout) as resp:
+            return json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] {method} failed: {exc}", file=sys.stderr)
+        return {"ok": False, "error": str(exc)}
+
+
+def send(chat_id, text, reply_markup=None, reply_to=None):
+    res = api(
+        "sendMessage",
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=reply_markup,
+        reply_to_message_id=reply_to,
+    )
+    if res.get("ok"):
+        return res["result"]["message_id"]
+    return None
+
+
+def edit(chat_id, message_id, text=None, reply_markup=None):
+    if text is not None:
+        api(
+            "editMessageText",
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+    else:
+        api(
+            "editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
+
+
+def answer(callback_id, text=None):
+    api("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
+
+# --------------------------------------------------------------------------
+# tmux helpers
+# --------------------------------------------------------------------------
+
+
+def _tmux(args):
+    return subprocess.run(
+        ["tmux", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def list_sessions():
+    """Return full names of tmux sessions matching PREFIX, sorted."""
+    res = _tmux(["list-sessions", "-F", "#{session_name}"])
+    if res.returncode != 0:
+        return []
+    names = [ln for ln in res.stdout.splitlines() if ln.startswith(PREFIX)]
+    return sorted(names)
+
+
+def capture_pane(session):
+    res = _tmux(["capture-pane", "-p", "-t", session])
+    if res.returncode != 0:
+        return None
+    return res.stdout
+
+
+def send_input(session, text):
+    """Type text literally into the session, then press Enter."""
+    text = text.rstrip("\n")
+    r1 = _tmux(["send-keys", "-t", session, "-l", "--", text])
+    if r1.returncode != 0:
+        return False
+    r2 = _tmux(["send-keys", "-t", session, "Enter"])
+    return r2.returncode == 0
+
+
+def session_exists(full):
+    return _tmux(["has-session", "-t", full]).returncode == 0
+
+
+def sanitize_name(s):
+    """Make a string safe as a tmux session name / folder name."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", s.strip()).strip("-")
+    return cleaned or "session"
+
+
+def list_subdirs(root):
+    """Immediate, non-hidden subdirectories of root (sorted)."""
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    return sorted(
+        e for e in entries
+        if not e.startswith(".") and os.path.isdir(os.path.join(root, e))
+    )
+
+
+def has_history(workdir):
+    """True if Claude Code already has a project history for this directory."""
+    enc = re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(workdir))
+    proj = os.path.join(os.path.expanduser("~"), ".claude", "projects", enc)
+    try:
+        return os.path.isdir(proj) and any(
+            f.endswith(".jsonl") for f in os.listdir(proj)
+        )
+    except OSError:
+        return False
+
+
+def launch_session(full, workdir):
+    """Create a detached session in workdir and start claude (resume if able)."""
+    res = _tmux(["new-session", "-d", "-s", full, "-c", workdir])
+    if res.returncode != 0:
+        return False, res.stderr.strip() or "tmux new-session failed"
+    cmd = "claude --continue" if has_history(workdir) else "claude"
+    _tmux(["send-keys", "-t", full, cmd, "Enter"])
+    return True, cmd
+
+
+def display_name(full):
+    return full[len(PREFIX):] if full.startswith(PREFIX) else full
+
+
+def full_name(disp):
+    return disp if disp.startswith(PREFIX) else PREFIX + disp
+
+
+# --------------------------------------------------------------------------
+# Formatting
+# --------------------------------------------------------------------------
+
+MAX_LINES = 60
+MAX_CHARS = 3500
+
+
+def render_pane(pane):
+    """Trim a capture to the last lines and wrap it in an expandable quote."""
+    if pane is None:
+        return "<i>(could not capture pane)</i>"
+    lines = pane.rstrip("\n").split("\n")
+    # drop trailing blank lines
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return "<blockquote expandable><i>(empty)</i></blockquote>"
+    if len(lines) > MAX_LINES:
+        lines = lines[-MAX_LINES:]
+    body = "\n".join(lines)
+    if len(body) > MAX_CHARS:
+        body = body[-MAX_CHARS:]
+    return f"<blockquote expandable>{html.escape(body)}</blockquote>"
+
+
+def status_text(full, pane, header_emoji="🖥"):
+    disp = html.escape(display_name(full))
+    return (
+        f"{header_emoji} <b>{disp}</b>\n"
+        f"{render_pane(pane)}\n"
+        f"<i>↩️ Reply to this message to send input.</i>"
+    )
+
+
+def build_keyboard(tag, sessions, page):
+    """Inline keyboard of session buttons (PAGE_SIZE per page) + nav row."""
+    pages = max(1, math.ceil(len(sessions) / PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    chunk = sessions[start:start + PAGE_SIZE]
+    rows = [
+        [{"text": display_name(s), "callback_data": f"{tag}|s|{display_name(s)}"}]
+        for s in chunk
+    ]
+    nav = []
+    if page > 0:
+        nav.append({"text": "◀️", "callback_data": f"{tag}|p|{page - 1}"})
+    if pages > 1:
+        nav.append({"text": f"{page + 1}/{pages}", "callback_data": f"{tag}|p|{page}"})
+    if page < pages - 1:
+        nav.append({"text": "▶️", "callback_data": f"{tag}|p|{page + 1}"})
+    if nav:
+        rows.append(nav)
+    return {"inline_keyboard": rows}
+
+
+def build_dir_keyboard(dirs, page):
+    """Folder buttons under PROJECT_ROOT + a 'create new folder' row."""
+    pages = max(1, math.ceil(len(dirs) / PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    chunk = dirs[start:start + PAGE_SIZE]
+    rows = [[{"text": "📁 " + d, "callback_data": f"nw|s|{d}"}] for d in chunk]
+    nav = []
+    if page > 0:
+        nav.append({"text": "◀️", "callback_data": f"nw|p|{page - 1}"})
+    if pages > 1:
+        nav.append({"text": f"{page + 1}/{pages}", "callback_data": f"nw|p|{page}"})
+    if page < pages - 1:
+        nav.append({"text": "▶️", "callback_data": f"nw|p|{page + 1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "➕ Create new folder", "callback_data": "nw|c|0"}])
+    return {"inline_keyboard": rows}
+
+
+CONFIRM_KB = {"inline_keyboard": [[
+    {"text": "✅ Create & start", "callback_data": "nw|mk|0"},
+    {"text": "✖️ Cancel", "callback_data": "nw|x|0"},
+]]}
+
+
+def do_new(chat_id, name, workdir, reply_to=None):
+    """Create the session (if absent), launch claude, and report it."""
+    full = full_name(sanitize_name(name))
+    if session_exists(full):
+        # Already running — show its current status instead of recreating it.
+        pane = capture_pane(full)
+        mid = send(
+            chat_id,
+            f"ℹ️ <b>{html.escape(display_name(full))}</b> is already running.\n"
+            + status_text(full, pane),
+            reply_to=reply_to,
+        )
+        if mid:
+            MSG_SESSION[mid] = full
+        return
+    ok, info = launch_session(full, workdir)
+    if not ok:
+        send(chat_id, f"⚠️ Could not start session:\n<code>{html.escape(info)}</code>",
+             reply_to=reply_to)
+        return
+    mid = send(
+        chat_id,
+        f"🚀 Started <b>{html.escape(display_name(full))}</b>\n"
+        f"📂 <code>{html.escape(workdir)}</code>\n"
+        f"▶️ <code>{html.escape(info)}</code>\n"
+        f"<i>↩️ Reply to this message to send input.</i>",
+        reply_to=reply_to,
+    )
+    if mid:
+        MSG_SESSION[mid] = full
+
+
+# --------------------------------------------------------------------------
+# Monitor tick
+# --------------------------------------------------------------------------
+
+
+def monitor_tick():
+    live = list_sessions()
+    live_set = set(live)
+    for session in live:
+        pane = capture_pane(session)
+        if pane is None:
+            continue
+        digest = str(hash(pane))
+        st = STATE.setdefault(session, {"hash": None, "count": 0, "reported": False})
+        if digest == st["hash"]:
+            st["count"] += 1
+            if st["count"] == IDLE_TICKS and not st["reported"]:
+                st["reported"] = True
+                mid = send(USER_ID, status_text(session, pane, "💤"))
+                if mid:
+                    MSG_SESSION[mid] = session
+        else:
+            st["hash"] = digest
+            st["count"] = 1
+            st["reported"] = False
+    # forget sessions that disappeared
+    for gone in [s for s in STATE if s not in live_set]:
+        STATE.pop(gone, None)
+
+
+# --------------------------------------------------------------------------
+# Update handlers
+# --------------------------------------------------------------------------
+
+
+def show_selection(chat_id, tag, prompt):
+    sessions = list_sessions()
+    if not sessions:
+        send(chat_id, "No matching tmux sessions found.")
+        return
+    send(chat_id, prompt, reply_markup=build_keyboard(tag, sessions, 0))
+
+
+def handle_message(msg):
+    if msg.get("from", {}).get("id") != USER_ID:
+        return
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+
+    # 0) Waiting for a new-folder name (from the ➕ Create new folder button)?
+    if NEW_DIR_WAIT.get(chat_id):
+        if text.strip() and not text.startswith("/"):
+            NEW_DIR_WAIT.pop(chat_id, None)
+            folder = sanitize_name(text)
+            workdir = os.path.join(PROJECT_ROOT, folder)
+            try:
+                os.makedirs(workdir, exist_ok=True)
+            except OSError as exc:
+                send(chat_id, f"⚠️ Couldn't create folder: {html.escape(str(exc))}")
+                return
+            do_new(chat_id, folder, workdir)
+            return
+        NEW_DIR_WAIT.pop(chat_id, None)  # a command cancels the wait; fall through
+
+    # 1) Reply to a tracked report/status message -> relay to that session.
+    reply = msg.get("reply_to_message")
+    if reply and reply.get("message_id") in MSG_SESSION:
+        if not text.strip():
+            send(chat_id, "Nothing to send (empty message).")
+            return
+        session = MSG_SESSION[reply["message_id"]]
+        if session not in set(list_sessions()):
+            send(chat_id, f"Session <b>{html.escape(display_name(session))}</b> is gone.")
+            return
+        ok = send_input(session, text)
+        send(
+            chat_id,
+            (f"✅ Sent to <b>{html.escape(display_name(session))}</b>"
+             if ok else "⚠️ Failed to send (tmux error)."),
+            reply_to=msg["message_id"],
+        )
+        return
+
+    # 2) Commands.
+    if text.startswith("/start") or text.startswith("/help"):
+        send(
+            chat_id,
+            "<b>muxpost</b>\n"
+            "• I report when a <code>" + html.escape(PREFIX) + "*</code> session goes idle.\n"
+            "• Reply to any report/status to type into that session.\n"
+            "• <code>/new</code> — pick a folder (or create one) and start a session.\n"
+            "• <code>/new &lt;name&gt; [path]</code> — start one directly.\n"
+            "• <code>/status</code> — pick a session to inspect.\n"
+            "• <code>/status &lt;name&gt;</code> — inspect one directly.\n"
+            "• Send plain text — I'll ask which session to send it to.",
+        )
+        return
+
+    if text.startswith("/new"):
+        if not PROJECT_ROOT:
+            send(chat_id, "No project root configured. Run "
+                          "<code>python3 setup.py</code> first.")
+            return
+        parts = text.split(maxsplit=2)
+        if len(parts) == 1:
+            dirs = list_subdirs(PROJECT_ROOT)
+            send(chat_id,
+                 f"📂 <b>{html.escape(PROJECT_ROOT)}</b>\n"
+                 "Pick a folder for the new session, or create one:",
+                 reply_markup=build_dir_keyboard(dirs, 0))
+            return
+        name = parts[1]
+        if len(parts) == 3:
+            workdir = os.path.abspath(os.path.expanduser(parts[2]))
+        else:
+            workdir = os.path.join(PROJECT_ROOT, name)
+        if os.path.isdir(workdir):
+            do_new(chat_id, name, workdir, reply_to=msg["message_id"])
+        else:
+            PENDING_NEW[chat_id] = {"name": name, "workdir": workdir}
+            send(chat_id,
+                 f"📁 <code>{html.escape(workdir)}</code> doesn't exist.\n"
+                 f"Create it and start <b>{html.escape(sanitize_name(name))}</b>?",
+                 reply_markup=CONFIRM_KB)
+        return
+
+    if text.startswith("/status"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            disp = parts[1].strip()
+            full = full_name(disp)
+            if full not in set(list_sessions()):
+                send(chat_id, f"No session named <b>{html.escape(disp)}</b>.")
+                return
+            pane = capture_pane(full)
+            mid = send(chat_id, status_text(full, pane))
+            if mid:
+                MSG_SESSION[mid] = full
+        else:
+            show_selection(chat_id, "st", "Select a session to inspect:")
+        return
+
+    if text.startswith("/"):
+        send(chat_id, "Unknown command. Try /help.")
+        return
+
+    # 3) Plain text with no reply -> ask which session to send it to.
+    if text.strip():
+        PENDING[chat_id] = text
+        show_selection(chat_id, "sn", "Send this to which session?")
+
+
+def handle_callback(cq):
+    if cq.get("from", {}).get("id") != USER_ID:
+        answer(cq["id"], "Not authorized")
+        return
+    data = cq.get("data", "")
+    msg = cq.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
+    parts = data.split("|", 2)
+    if len(parts) < 2:
+        answer(cq["id"])
+        return
+    tag, kind = parts[0], parts[1]
+    val = parts[2] if len(parts) > 2 else ""
+
+    # New-session / folder picker flow.
+    if tag == "nw":
+        if kind == "p":
+            try:
+                page = int(val)
+            except ValueError:
+                page = 0
+            edit(chat_id, message_id,
+                 reply_markup=build_dir_keyboard(list_subdirs(PROJECT_ROOT), page))
+            answer(cq["id"])
+            return
+        if kind == "c":  # "create new folder" -> wait for a typed name
+            NEW_DIR_WAIT[chat_id] = True
+            PENDING_NEW.pop(chat_id, None)
+            edit(chat_id, message_id,
+                 text="✏️ Send a name for the new folder, created under "
+                      f"<code>{html.escape(PROJECT_ROOT)}</code>.")
+            answer(cq["id"])
+            return
+        if kind == "x":  # cancel a pending create-confirm
+            PENDING_NEW.pop(chat_id, None)
+            edit(chat_id, message_id, text="✖️ Cancelled.")
+            answer(cq["id"])
+            return
+        if kind == "mk":  # confirm: create the folder, then launch
+            req = PENDING_NEW.pop(chat_id, None)
+            if not req:
+                edit(chat_id, message_id, text="⌛ That request expired. Try /new again.")
+                answer(cq["id"])
+                return
+            try:
+                os.makedirs(req["workdir"], exist_ok=True)
+            except OSError as exc:
+                edit(chat_id, message_id,
+                     text=f"⚠️ Couldn't create folder: {html.escape(str(exc))}")
+                answer(cq["id"])
+                return
+            edit(chat_id, message_id,
+                 text=f"📁 Created <code>{html.escape(req['workdir'])}</code>")
+            do_new(chat_id, req["name"], req["workdir"])
+            answer(cq["id"])
+            return
+        if kind == "s":  # an existing folder was picked
+            workdir = os.path.join(PROJECT_ROOT, val)
+            if not os.path.isdir(workdir):
+                edit(chat_id, message_id, text=f"📁 <b>{html.escape(val)}</b> is gone.")
+                answer(cq["id"])
+                return
+            edit(chat_id, message_id, text=f"📂 <code>{html.escape(workdir)}</code>")
+            do_new(chat_id, val, workdir)
+            answer(cq["id"])
+            return
+        answer(cq["id"])
+        return
+
+    # Pagination.
+    if kind == "p":
+        try:
+            page = int(val)
+        except ValueError:
+            page = 0
+        edit(chat_id, message_id, reply_markup=build_keyboard(tag, list_sessions(), page))
+        answer(cq["id"])
+        return
+
+    # Session chosen.
+    if kind == "s":
+        full = full_name(val)
+        if full not in set(list_sessions()):
+            edit(chat_id, message_id, text=f"Session <b>{html.escape(val)}</b> is gone.")
+            answer(cq["id"])
+            return
+
+        if tag == "st":
+            pane = capture_pane(full)
+            edit(chat_id, message_id, text=status_text(full, pane))
+            MSG_SESSION[message_id] = full
+            answer(cq["id"], "Reply to that message to type into it.")
+            return
+
+        if tag == "sn":
+            pending = PENDING.pop(chat_id, None)
+            if pending is None:
+                edit(chat_id, message_id, text="⌛ That request expired. Send the message again.")
+                answer(cq["id"])
+                return
+            ok = send_input(full, pending)
+            disp = html.escape(display_name(full))
+            preview = html.escape(pending if len(pending) <= 80 else pending[:77] + "…")
+            edit(
+                chat_id,
+                message_id,
+                text=(f"✅ Sent to <b>{disp}</b>:\n<code>{preview}</code>"
+                      if ok else f"⚠️ Failed to send to <b>{disp}</b>."),
+            )
+            answer(cq["id"])
+            return
+
+    answer(cq["id"])
+
+
+def dispatch(update):
+    try:
+        if "callback_query" in update:
+            handle_callback(update["callback_query"])
+        elif "message" in update:
+            handle_message(update["message"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[dispatch] error: {exc}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# Main loop (long-poll getUpdates + scheduled monitor ticks)
+# --------------------------------------------------------------------------
+
+
+def main():
+    me = api("getMe")
+    if not me.get("ok"):
+        print("Could not reach Telegram / bad token.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Started as @{me['result'].get('username')}. "
+          f"Watching '{PREFIX}*' every {INTERVAL}s, "
+          f"reporting after {IDLE_TICKS} idle ticks.")
+
+    offset = None
+    last_tick = 0.0
+    while True:
+        now = time.monotonic()
+        if now - last_tick >= INTERVAL:
+            last_tick = now
+            try:
+                monitor_tick()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[monitor] error: {exc}", file=sys.stderr)
+
+        # Long-poll only until the next tick is due (keeps ticks on time).
+        wait = max(1, int(INTERVAL - (time.monotonic() - last_tick)))
+        res = api(
+            "getUpdates",
+            _timeout=wait + 10,
+            offset=offset,
+            timeout=wait,
+            allowed_updates=["message", "callback_query"],
+        )
+        if not res.get("ok"):
+            time.sleep(1)
+            continue
+        for update in res["result"]:
+            offset = update["update_id"] + 1
+            dispatch(update)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nbye")

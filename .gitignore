@@ -1,0 +1,17 @@
+# Secrets / local config (contains bot token) — never commit
+config.json
+
+# Runtime
+muxpost.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Installer temp
+*.muxtmp
+
+# OS / editor
+.DS_Store
+*.swp

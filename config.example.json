@@ -1,0 +1,9 @@
+{
+  "bot_token": "123456:ABC-PUT-YOUR-BOTFATHER-TOKEN-HERE",
+  "user_id": 0,
+  "project_root": "/home/you/projects",
+  "prefix": "claude-",
+  "interval": 5,
+  "idle_ticks": 3,
+  "page_size": 5
+}
