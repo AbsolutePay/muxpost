@@ -196,12 +196,35 @@ def _tmux(args):
 
 
 def list_sessions():
-    """Return full names of tmux sessions matching PREFIX, sorted."""
+    """Return full names of tmux sessions matching PREFIX, sorted by name."""
     res = _tmux(["list-sessions", "-F", "#{session_name}"])
     if res.returncode != 0:
         return []
     names = [ln for ln in res.stdout.splitlines() if ln.startswith(PREFIX)]
     return sorted(names)
+
+
+def sessions_by_recency():
+    """Matching sessions ordered by last activity (most recent first).
+
+    tmux's session_activity updates both when the session produces output and
+    when we send keys, so the project you're actively working on floats to top.
+    """
+    res = _tmux(["list-sessions", "-F", "#{session_activity}\t#{session_name}"])
+    if res.returncode != 0:
+        return list_sessions()
+    rows = []
+    for ln in res.stdout.splitlines():
+        act, _, name = ln.partition("\t")
+        if not name.startswith(PREFIX):
+            continue
+        try:
+            act = int(act)
+        except ValueError:
+            act = 0
+        rows.append((act, name))
+    rows.sort(key=lambda r: (-r[0], r[1]))  # newest first, name as tiebreak
+    return [name for _, name in rows]
 
 
 def capture_pane(session):
@@ -613,7 +636,7 @@ def monitor_tick():
 
 
 def show_selection(chat_id, tag, prompt):
-    sessions = list_sessions()
+    sessions = sessions_by_recency()
     if not sessions:
         send(chat_id, "No matching tmux sessions found.")
         return
@@ -856,7 +879,7 @@ def handle_callback(cq):
             page = int(val)
         except ValueError:
             page = 0
-        edit(chat_id, message_id, reply_markup=build_keyboard(tag, list_sessions(), page))
+        edit(chat_id, message_id, reply_markup=build_keyboard(tag, sessions_by_recency(), page))
         answer(cq["id"])
         return
 
