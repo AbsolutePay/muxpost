@@ -11,6 +11,7 @@ Re-run any time; it keeps existing values unless you change them.
 
 import json
 import os
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,11 +93,18 @@ if not os.path.isdir(root):
     else:
         print("  (saving anyway; create it before running the bot)")
 
+# --- autostart -------------------------------------------------------------
+cur_auto = bool(cfg.get("autostart", False))
+default_auto = "y" if cur_auto else "n"
+auto_ans = ask("Start muxpost automatically (background + on boot)? (y/N)", default_auto)
+autostart = auto_ans.lower().startswith("y")
+
 # --- write -----------------------------------------------------------------
 cfg.update({
     "bot_token": token,
     "user_id": uid,
     "project_root": root,
+    "autostart": autostart,
 })
 cfg.setdefault("prefix", "claude-")
 cfg.setdefault("interval", 5)
@@ -110,6 +118,22 @@ with open(CFG_PATH, "w", encoding="utf-8") as fh:
 print(f"\nWrote {CFG_PATH}")
 print(f"  prefix       {cfg['prefix']}")
 print(f"  project_root {cfg['project_root']}")
+print(f"  autostart    {autostart}")
 if not token:
     print("\n⚠️  No bot token set — add it before running the bot.")
-print("\nNext: python3 doctor.py   then   python3 muxpost.py")
+
+# --- apply autostart via the platform installer ----------------------------
+if os.name == "nt":
+    installer = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", os.path.join(HERE, "install.ps1")]
+    flag = "-ServiceOnly" if autostart else "-ServiceOff"
+else:
+    installer = ["bash", os.path.join(HERE, "install.sh")]
+    flag = "--service-only" if autostart else "--service-off"
+try:
+    print("\n" + ("Enabling autostart…" if autostart else "Disabling autostart…"))
+    subprocess.run(installer + [flag], check=False)
+except Exception as exc:  # noqa: BLE001
+    print(f"(autostart step skipped: {exc})")
+
+print("\nNext: muxpost doctor   then   muxpost")

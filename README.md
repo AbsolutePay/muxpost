@@ -26,18 +26,14 @@ A tiny Telegram bot that controls all your `claude-*` tmux sessions from chat.
 ## Install
 
 The installer clones muxpost from GitHub, puts a `muxpost` command on your PATH,
-and leaves configuration to `muxpost init`. Then:
-
-```
-muxpost init      # configure: bot token, your user id, project root
-muxpost           # run it   (or: muxpost start  for the background)
-```
+and then runs `muxpost init` for you — which asks for your bot token, user id,
+project root, and **whether to enable autostart** (background + on boot).
 
 **Linux / macOS / WSL:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.sh | bash
-# add an auto-start service:        ... | bash -s -- --service
+# install the command only, configure later:   ... | bash -s -- --no-init
 ```
 
 **Windows (PowerShell):**
@@ -45,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.sh
 ```powershell
 irm https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.ps1 | iex
 ```
+
+You can re-run `muxpost init` any time to change settings or toggle autostart.
 
 > The one-liners need the repo to be **public**. While it's private, clone first
 > (`gh repo clone AbsolutePay/muxpost && cd muxpost && ./install.sh`) — the
@@ -57,13 +55,14 @@ from [@userinfobot](https://t.me/userinfobot).
 The installer clones to `~/.local/share/muxpost` (override with `MUXPOST_HOME`)
 and adds a launcher to a user bin dir (`~/.local/bin` /
 `%LOCALAPPDATA%\muxpost\bin`). Re-running it updates the clone. Remove with
-`--service`'s counterpart: `<clone>/install.sh --uninstall` (or `-Uninstall`).
+`<clone>/install.sh --uninstall` (or `-Uninstall`).
 
-**WSL note:** `--service` auto-detects WSL — with systemd enabled
-(`/etc/wsl.conf` `[boot] systemd=true`) it uses a systemd user unit; otherwise it
-adds a guarded autostart line to `~/.bashrc` and prints a Windows Task Scheduler
-command for logon start. On native Windows the bot needs `tmux`, which lives in
-WSL, so run the bot inside WSL (`install.sh` there).
+**Autostart** (the init question) adapts per platform: a **systemd user unit** on
+Linux / WSL-with-systemd, a **launchd agent** on macOS, a **scheduled task** on
+Windows, and on **WSL without systemd** a guarded line in `~/.bashrc` (plus a
+printed Windows Task Scheduler command for logon start). On native Windows the
+bot needs `tmux`, which lives in WSL, so run the bot inside WSL (`install.sh`
+there).
 
 ## Manual setup
 
@@ -111,7 +110,7 @@ muxpost restart    # restart in place (keeps the same PID)
 muxpost upgrade    # git pull --ff-only, then restart onto the new version
 muxpost status     # show version (git short SHA) and whether it's running
 muxpost doctor     # run the preflight check
-muxpost setup      # re-run interactive configuration
+muxpost init       # re-run configuration (token, user id, root, autostart)
 ```
 
 `restart` and `upgrade` work the same from chat: **`/restart`** and **`/upgrade`**.
@@ -139,6 +138,7 @@ script before launching the bot.
 | `bot_token`  | `TG_BOT_TOKEN` | —          | BotFather token (required)           |
 | `user_id`    | `TG_USER_ID`   | —          | allowed Telegram user id (required)  |
 | `project_root`| `TG_PROJECT_ROOT`| —      | root folder `/new` creates sessions in|
+| `autostart`  | —              | `false`    | whether `init` enabled background/boot start|
 | `prefix`     | `TG_PREFIX`    | `claude-`  | session name prefix to watch         |
 | `interval`   | `TG_INTERVAL`  | `5`        | seconds between capture ticks        |
 | `idle_ticks` | `TG_IDLE_TICKS`| `3`        | unchanged ticks before an idle report|

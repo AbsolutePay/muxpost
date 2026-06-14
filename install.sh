@@ -4,14 +4,15 @@
 #
 # One-line install (works once the repo is public):
 #   curl -fsSL https://raw.githubusercontent.com/AbsolutePay/muxpost/main/install.sh | bash
-#   # pass flags after --, e.g.  ... | bash -s -- --service
+#
+# It clones muxpost, installs the `muxpost` command, then runs `muxpost init`
+# (configuration), which also asks whether to enable autostart.
 #
 # From a checkout:
-#   ./install.sh              install the `muxpost` command
-#   ./install.sh --service    also register an auto-start service
-#   ./install.sh --uninstall  remove the command and any service
+#   ./install.sh              install the command, then run init
+#   ./install.sh --no-init    install the command only (configure later)
+#   ./install.sh --uninstall  remove the command and any autostart
 #
-# After installing, configure with:  muxpost init
 # Needs git + python3 (and tmux at runtime).
 
 set -eu
@@ -51,108 +52,18 @@ remove_profile_block() {
   done
 }
 
-# --- flags -----------------------------------------------------------------
-DO_SERVICE=0; DO_UNINSTALL=0
-for arg in "$@"; do
-  case "$arg" in
-    --service)   DO_SERVICE=1 ;;
-    --uninstall) DO_UNINSTALL=1 ;;
-    -h|--help)
-      sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) die "unknown option: $arg (try --help)" ;;
-  esac
-done
-
-# --- find python -----------------------------------------------------------
-PYTHON=""
-for cand in python3 python; do
-  if command -v "$cand" >/dev/null 2>&1; then
-    if "$cand" -c 'import sys; sys.exit(0 if sys.version_info>=(3,8) else 1)' 2>/dev/null; then
-      PYTHON="$(command -v "$cand")"; break
-    fi
-  fi
-done
-
+# --- paths -----------------------------------------------------------------
 OS="$(uname -s)"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 LAUNCHER="$BIN_DIR/muxpost"
-
-# --- service paths ---------------------------------------------------------
 SYSTEMD_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/muxpost.service"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.muxpost.agent.plist"
 
-uninstall() {
-  info "${B}Uninstalling muxpost${N}"
-  if [ "$OS" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --user disable --now muxpost.service >/dev/null 2>&1 || true
-    [ -f "$SYSTEMD_UNIT" ] && rm -f "$SYSTEMD_UNIT" && ok "removed systemd service"
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-  fi
-  if [ "$OS" = "Darwin" ]; then
-    launchctl unload "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
-    [ -f "$LAUNCHD_PLIST" ] && rm -f "$LAUNCHD_PLIST" && ok "removed launchd agent"
-  fi
-  remove_profile_block && ok "removed any shell-profile autostart"
-  [ -f "$LAUNCHER" ] && rm -f "$LAUNCHER" && ok "removed $LAUNCHER"
-  info "Done. (config.json and the project folder were left untouched.)"
-  exit 0
-}
-
-[ "$DO_UNINSTALL" = "1" ] && uninstall
-
-# --- obtain the project (clone from GitHub when not run from a checkout) ----
-REPO_URL="${MUXPOST_REPO:-https://github.com/AbsolutePay/muxpost.git}"
-INSTALL_DIR="${MUXPOST_HOME:-$HOME/.local/share/muxpost}"
-if [ ! -f "$SCRIPT_DIR/muxpost.py" ]; then
-  command -v git >/dev/null 2>&1 || die "git is required to install muxpost."
-  if [ -d "$INSTALL_DIR/.git" ]; then
-    info "Updating muxpost in $INSTALL_DIR"
-    git -C "$INSTALL_DIR" pull --ff-only -q || warn "update failed; using existing copy"
-  else
-    info "Cloning $REPO_URL into $INSTALL_DIR"
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --depth 1 -q "$REPO_URL" "$INSTALL_DIR" \
-      || die "clone failed — is the repo public, or have you run: gh auth setup-git ?"
-  fi
-  SCRIPT_DIR="$INSTALL_DIR"
-fi
-
-# --- install ---------------------------------------------------------------
-info "${B}Installing muxpost${N} from $SCRIPT_DIR"
-[ -n "$PYTHON" ] || die "Python 3.8+ not found. Install python3 and re-run."
-ok "python: $PYTHON ($("$PYTHON" -V 2>&1))"
-
-if command -v tmux >/dev/null 2>&1; then
-  ok "tmux: $(command -v tmux) ($(tmux -V 2>/dev/null))"
-else
-  warn "tmux not found — muxpost needs it at runtime (on Windows use WSL)."
-fi
-
-# launcher on PATH
-mkdir -p "$BIN_DIR"
-cat > "$LAUNCHER" <<EOF
-#!/usr/bin/env bash
-exec "$PYTHON" "$SCRIPT_DIR/muxpost.py" "\$@"
-EOF
-chmod +x "$LAUNCHER"
-ok "installed command: $LAUNCHER"
-
-case ":$PATH:" in
-  *":$BIN_DIR:"*) : ;;
-  *) warn "$BIN_DIR is not on your PATH. Add this to your shell profile:"
-     printf '      export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
-esac
-
-# config status (configuration is done separately via `muxpost init`)
-HAS_CONFIG=0
-[ -f "$SCRIPT_DIR/config.json" ] && HAS_CONFIG=1
-[ "$HAS_CONFIG" = "1" ] && ok "config.json already present"
-
-# optional auto-start service
+# --- autostart service (defined early; called by --service-only/off + init) -
 install_service_profile() {
-  # For WSL (no systemd) and other init-less setups: launch from shell profile,
+  # WSL (no systemd) and other init-less setups: launch from the shell profile,
   # guarded so it only starts once even across many shells.
-  PROFILE="$HOME/.bashrc"; [ -f "$PROFILE" ] || PROFILE="$HOME/.profile"
+  local PROFILE; PROFILE="$HOME/.bashrc"; [ -f "$PROFILE" ] || PROFILE="$HOME/.profile"
   remove_profile_block
   cat >> "$PROFILE" <<EOF
 $MARK_BEGIN
@@ -163,22 +74,23 @@ if command -v pgrep >/dev/null 2>&1 && ! pgrep -f "$SCRIPT_DIR/muxpost.py" >/dev
 fi
 $MARK_END
 EOF
-  ok "autostart added to $PROFILE (starts on next shell). Logs: $SCRIPT_DIR/muxpost.log"
-  warn "open a new shell to start it now, or run: muxpost &"
+  ok "autostart added to $PROFILE (starts each new shell). Logs: $SCRIPT_DIR/muxpost.log"
+  # start now too, if configured and not already running
+  if [ -f "$SCRIPT_DIR/config.json" ] && ! pgrep -f "$SCRIPT_DIR/muxpost.py" >/dev/null 2>&1; then
+    nohup "$PYTHON" "$SCRIPT_DIR/muxpost.py" >> "$SCRIPT_DIR/muxpost.log" 2>&1 &
+    ok "started now (pid $!)"
+  fi
   if is_wsl; then
-    info "      Tip: to start muxpost without opening a WSL shell, add a Windows"
-    info "      Task Scheduler task at logon running:"
+    info "      Tip: to start without opening a WSL shell, add a Windows Task"
+    info "      Scheduler task at logon running:"
     info "        wsl.exe -d ${WSL_DISTRO_NAME:-<distro>} -e $PYTHON $SCRIPT_DIR/muxpost.py"
   fi
 }
 
 install_service_linux() {
   if ! has_systemd; then
-    if is_wsl; then
-      warn "WSL without systemd detected — using shell-profile autostart instead."
-    else
-      warn "systemd not running — using shell-profile autostart instead."
-    fi
+    is_wsl && warn "WSL without systemd — using shell-profile autostart." \
+           || warn "systemd not running — using shell-profile autostart."
     install_service_profile
     return
   fi
@@ -200,8 +112,8 @@ WantedBy=default.target
 EOF
   systemctl --user daemon-reload
   systemctl --user enable --now muxpost.service
-  ok "service enabled (systemd user). Logs: journalctl --user -u muxpost -f"
-  warn "for it to run while logged out: sudo loginctl enable-linger $USER"
+  ok "autostart enabled (systemd user). Logs: journalctl --user -u muxpost -f"
+  warn "to run while logged out: sudo loginctl enable-linger $USER"
 }
 
 install_service_macos() {
@@ -224,26 +136,128 @@ install_service_macos() {
 EOF
   launchctl unload "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
   launchctl load "$LAUNCHD_PLIST"
-  ok "service loaded (launchd). Logs: $SCRIPT_DIR/muxpost.log"
+  ok "autostart loaded (launchd). Logs: $SCRIPT_DIR/muxpost.log"
 }
 
-if [ "$DO_SERVICE" = "1" ]; then
-  [ "$HAS_CONFIG" = "1" ] || warn "no config yet — run 'muxpost init' before the service can start."
-  info "${B}Registering auto-start service…${N}"
+install_service() {
   case "$OS" in
     Linux)  install_service_linux ;;
     Darwin) install_service_macos ;;
-    *) warn "unknown OS '$OS'; skipping service." ;;
+    *) warn "unknown OS '$OS'; skipping autostart." ;;
   esac
+}
+
+remove_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now muxpost.service >/dev/null 2>&1 || true
+    [ -f "$SYSTEMD_UNIT" ] && rm -f "$SYSTEMD_UNIT" && ok "removed systemd service"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  if [ "$OS" = "Darwin" ]; then
+    launchctl unload "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
+    [ -f "$LAUNCHD_PLIST" ] && rm -f "$LAUNCHD_PLIST" && ok "removed launchd agent"
+  fi
+  if grep -qsF "$MARK_BEGIN" "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null; then
+    remove_profile_block && ok "removed shell-profile autostart"
+  fi
+}
+
+# --- find python -----------------------------------------------------------
+PYTHON=""
+for cand in python3 python; do
+  if command -v "$cand" >/dev/null 2>&1 \
+     && "$cand" -c 'import sys; sys.exit(0 if sys.version_info>=(3,8) else 1)' 2>/dev/null; then
+    PYTHON="$(command -v "$cand")"; break
+  fi
+done
+
+# --- flags -----------------------------------------------------------------
+DO_UNINSTALL=0; DO_INIT=1; SERVICE_ACTION=""
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall)    DO_UNINSTALL=1 ;;
+    --no-init)      DO_INIT=0 ;;
+    --service-only) SERVICE_ACTION="only" ;;   # used by `muxpost init`
+    --service-off)  SERVICE_ACTION="off" ;;    # used by `muxpost init`
+    -h|--help)      sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $arg (try --help)" ;;
+  esac
+done
+
+# --- uninstall -------------------------------------------------------------
+if [ "$DO_UNINSTALL" = "1" ]; then
+  info "${B}Uninstalling muxpost${N}"
+  remove_service
+  [ -f "$LAUNCHER" ] && rm -f "$LAUNCHER" && ok "removed $LAUNCHER"
+  info "Done. (config.json and the project folder were left untouched.)"
+  exit 0
+fi
+
+# --- service-only / service-off (invoked by init) --------------------------
+if [ -n "$SERVICE_ACTION" ]; then
+  [ -n "$PYTHON" ] || die "Python 3.8+ not found."
+  case "$SERVICE_ACTION" in
+    only) install_service ;;
+    off)  remove_service ;;
+  esac
+  exit 0
+fi
+
+# --- obtain the project (clone from GitHub when not run from a checkout) ----
+REPO_URL="${MUXPOST_REPO:-https://github.com/AbsolutePay/muxpost.git}"
+INSTALL_DIR="${MUXPOST_HOME:-$HOME/.local/share/muxpost}"
+if [ ! -f "$SCRIPT_DIR/muxpost.py" ]; then
+  command -v git >/dev/null 2>&1 || die "git is required to install muxpost."
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    info "Updating muxpost in $INSTALL_DIR"
+    git -C "$INSTALL_DIR" pull --ff-only -q || warn "update failed; using existing copy"
+  else
+    info "Cloning $REPO_URL into $INSTALL_DIR"
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone --depth 1 -q "$REPO_URL" "$INSTALL_DIR" \
+      || die "clone failed — is the repo public, or have you run: gh auth setup-git ?"
+  fi
+  SCRIPT_DIR="$INSTALL_DIR"
+fi
+
+# --- install ---------------------------------------------------------------
+info "${B}Installing muxpost${N} from $SCRIPT_DIR"
+[ -n "$PYTHON" ] || die "Python 3.8+ not found. Install python3 and re-run."
+ok "python: $PYTHON ($("$PYTHON" -V 2>&1))"
+if command -v tmux >/dev/null 2>&1; then
+  ok "tmux: $(command -v tmux) ($(tmux -V 2>/dev/null))"
+else
+  warn "tmux not found — muxpost needs it at runtime (on Windows use WSL)."
+fi
+
+mkdir -p "$BIN_DIR"
+cat > "$LAUNCHER" <<EOF
+#!/usr/bin/env bash
+exec "$PYTHON" "$SCRIPT_DIR/muxpost.py" "\$@"
+EOF
+chmod +x "$LAUNCHER"
+ok "installed command: $LAUNCHER"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) : ;;
+  *) warn "$BIN_DIR is not on your PATH. Add to your shell profile:"
+     printf '      export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
+esac
+
+# --- run init (configuration + autostart question) -------------------------
+if [ "$DO_INIT" = "1" ]; then
+  if [ -r /dev/tty ]; then
+    info ""
+    info "${B}Configuring muxpost…${N}"
+    "$PYTHON" "$SCRIPT_DIR/muxpost.py" init </dev/tty || warn "init didn't finish — run: muxpost init"
+  else
+    warn "no terminal available for interactive setup."
+  fi
 fi
 
 info ""
 ok "${B}muxpost installed.${N}"
-if [ "$HAS_CONFIG" = "1" ]; then
-  info "Next   : ${B}muxpost${N} to run   (or ${B}muxpost start${N} for background)"
-else
-  info "Next   : ${B}muxpost init${N}    to configure (token, user id, project root)"
-  info "Then   : ${B}muxpost${N}         to run   (or ${B}muxpost start${N})"
-fi
-info "Check  : muxpost doctor"
-info "Remove : $SCRIPT_DIR/install.sh --uninstall"
+info "Configure : ${B}muxpost init${N}     (token, user id, project root, autostart)"
+info "Run       : ${B}muxpost${N}          (or muxpost start)"
+info "Check     : muxpost doctor"
+info "Remove    : $SCRIPT_DIR/install.sh --uninstall"
