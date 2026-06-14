@@ -413,18 +413,32 @@ def detect_menu(pane):
     Claude renders a numbered menu ('❯ 1. …', '  2. …') with an
     'Enter to select · ↑/↓ to navigate · Esc to cancel' footer; pressing the
     number selects that option. Description lines (deeper indent) are ignored.
+
+    Only the menu at the very bottom counts. Options are numbered 1..N
+    top-to-bottom, so walking up from the footer they descend by exactly 1 —
+    we stop the moment that run breaks. This skips dividers and wrapped
+    description lines inside the menu (Claude sometimes draws a rule between
+    options), while excluding any numbered list printed earlier in the
+    conversation: its numbers won't continue the menu's sequence.
     """
     if not pane:
         return None
     lines = pane.split("\n")
-    tail = "\n".join(lines[-4:])
+    # The footer is the last non-blank line, but Claude can leave several blank
+    # lines below it — match on the last few non-blank lines, not a fixed slice.
+    tail = "\n".join([l for l in lines if l.strip()][-3:])
     if not ("Esc to cancel" in tail or "to navigate" in tail or "Enter to select" in tail):
         return None
     opts = []
-    for line in lines:
+    for line in reversed(lines):
         m = re.match(r"^(?:❯ |  )(\d+)\.\s+(.+)$", line)
-        if m:
-            opts.append((m.group(1), m.group(2).strip()))
+        if not m:
+            continue
+        num = int(m.group(1))
+        if opts and num != int(opts[-1][0]) - 1:
+            break                    # sequence broke — top of the menu reached
+        opts.append((m.group(1), m.group(2).strip()))
+    opts.reverse()
     return opts or None
 
 
