@@ -113,7 +113,12 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable --now muxpost.service
   ok "autostart enabled (systemd user). Logs: journalctl --user -u muxpost -f"
-  warn "to run while logged out: sudo loginctl enable-linger $USER"
+  if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
+    ok "linger is on — muxpost keeps running while you're logged out."
+  else
+    warn "muxpost will pause when you log out. To keep it running 24/7, run once:"
+    info "        sudo loginctl enable-linger $USER"
+  fi
 }
 
 install_service_macos() {
