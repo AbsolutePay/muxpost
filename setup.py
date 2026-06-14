@@ -56,7 +56,9 @@ print("-------------\n")
 # --- bot token -------------------------------------------------------------
 cur_token = cfg.get("bot_token", "")
 hint = " (configured — leave blank to keep)" if cur_token else ""
-token = ask(f"Bot token from @BotFather{hint}", cur_token)
+# Pass no default so ask() never echoes the token in the "[default]" hint.
+entered = ask(f"Bot token from @BotFather{hint}")
+token = entered or cur_token
 if token:
     uname = bot_username(token)
     if uname:
