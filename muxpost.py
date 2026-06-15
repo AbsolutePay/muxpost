@@ -526,8 +526,9 @@ def action_keyboard(full, pane):
             rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
                           "callback_data": f"o|{disp}|{o['num']}"}])
         if multi:
-            # Checkboxes only toggle; Enter commits the whole selection.
-            rows.append([{"text": "✅ Submit", "callback_data": f"o|{disp}|Enter"}])
+            # Checkboxes only toggle (Enter toggles the highlighted one). To
+            # commit you move right to the "Submit" tab, then Enter.
+            rows.append([{"text": "✅ Submit", "callback_data": f"o|{disp}|Submit"}])
     else:
         q = detect_queue(pane)
         if q:
@@ -1036,18 +1037,23 @@ def handle_callback(cq):
         return
 
     # Drive a Claude selection menu: a number selects (single-select) or toggles
-    # a checkbox (multi-select); "Enter" commits a multi-select. rebuild_status
-    # re-captures, so a toggled ☐→☑ shows immediately.
+    # a checkbox (multi-select). "Submit" commits a multi-select by moving right
+    # to the Submit tab then pressing Enter. rebuild_status re-captures, so a
+    # toggled ☐→☑ shows immediately.
     if tag == "o":
         full = full_name(kind)
         if not session_exists(full):
             answer(cq["id"], "Session is gone")
             edit(chat_id, message_id, reply_markup=None)
             return
-        ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
+        if val == "Submit":
+            _tmux(["send-keys", "-t", full, "Right"])
+            ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
+        else:
+            ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
         if ok:
             mark_sent(full)
-        if val == "Enter":
+        if val == "Submit":
             answer(cq["id"], "Submitted ✓" if ok else "Failed")
             note = "✅ Submitted" if ok else "⚠️ Failed to submit"
         else:
