@@ -337,6 +337,31 @@ def full_name(disp):
     return disp if disp.startswith(PREFIX) else PREFIX + disp
 
 
+def session_from_reply(reply):
+    """Which live session a replied-to bot message is about, or None.
+
+    Fast path: the in-memory message->session map. Fallback (after a restart
+    clears that map, or for confirmation messages we never tracked): recover
+    the display name from the message's bold header — every status / report /
+    action message renders the session name in bold — and accept it only if
+    that session is currently live.
+    """
+    if not reply:
+        return None
+    tracked = MSG_SESSION.get(reply.get("message_id"))
+    if tracked:
+        return tracked
+    text = reply.get("text") or ""
+    units = text.encode("utf-16-le")  # Telegram entity offsets are UTF-16 units
+    for ent in reply.get("entities") or []:
+        if ent.get("type") == "bold":
+            lo, hi = ent["offset"] * 2, (ent["offset"] + ent["length"]) * 2
+            disp = units[lo:hi].decode("utf-16-le", "ignore").strip()
+            full = full_name(disp)
+            return full if session_exists(full) else None
+    return None
+
+
 # --------------------------------------------------------------------------
 # Formatting
 # --------------------------------------------------------------------------
@@ -807,13 +832,13 @@ def handle_message(msg):
             return
         NEW_DIR_WAIT.pop(chat_id, None)  # a command cancels the wait; fall through
 
-    # 1) Reply to a tracked report/status message -> relay to that session.
-    reply = msg.get("reply_to_message")
-    if reply and reply.get("message_id") in MSG_SESSION:
+    # 1) Reply to a report/status/action message -> relay straight to that
+    # session, no guessing. The target is recovered even after a restart.
+    session = session_from_reply(msg.get("reply_to_message"))
+    if session:
         if not text.strip():
             send(chat_id, "Nothing to send (empty message).")
             return
-        session = MSG_SESSION[reply["message_id"]]
         if session not in set(list_sessions()):
             send(chat_id, f"Session <b>{html.escape(display_name(session))}</b> is gone.")
             return
