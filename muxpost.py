@@ -487,6 +487,22 @@ def action_keyboard(full, pane):
     return {"inline_keyboard": rows}
 
 
+def rebuild_status(chat_id, message_id, full, note=None):
+    """Re-capture the pane and rewrite a status/report message in place.
+
+    Keeps the message live: fresh pane, current menu/queue buttons, and an
+    always-present Refresh button. `note` (e.g. what action just ran) is shown
+    with a timestamp; falling back to a plain refresh stamp.
+    """
+    pane = capture_pane(full)
+    stamp = time.strftime("%H:%M:%S")
+    tail = f"{note} · {stamp}" if note else f"🔄 Refreshed {stamp}"
+    edit(chat_id, message_id,
+         text=status_text(full, pane) + f"\n<i>{tail}</i>",
+         reply_markup=action_keyboard(full, pane))
+    MSG_SESSION[message_id] = full
+
+
 def build_keyboard(tag, sessions, page):
     """Inline keyboard of session buttons (PAGE_SIZE per page) + nav row."""
     pages = max(1, math.ceil(len(sessions) / PAGE_SIZE))
@@ -928,12 +944,7 @@ def handle_callback(cq):
             answer(cq["id"], "Session is gone")
             edit(chat_id, message_id, reply_markup=None)
             return
-        pane = capture_pane(full)
-        ts = time.strftime("%H:%M:%S")
-        text = status_text(full, pane) + f"\n<i>🔄 Refreshed {ts}</i>"
-        edit(chat_id, message_id, text=text,
-             reply_markup=action_keyboard(full, pane))
-        MSG_SESSION[message_id] = full
+        rebuild_status(chat_id, message_id, full)
         answer(cq["id"], "Refreshed")
         return
 
@@ -946,9 +957,9 @@ def handle_callback(cq):
             return
         ok = send_queued(full)
         answer(cq["id"], "Sent ✓" if ok else "Failed")
-        edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
-            {"text": "✅ Queued message sent" if ok else "⚠️ Failed to send",
-             "callback_data": "noop"}]]})
+        rebuild_status(chat_id, message_id, full,
+                       note="▶️ Sent queued message" if ok
+                            else "⚠️ Failed to send queued message")
         return
 
     # Pick an option from a Claude selection menu (press the number).
@@ -962,9 +973,9 @@ def handle_callback(cq):
         if ok:
             mark_sent(full)
         answer(cq["id"], f"Selected {val} ✓" if ok else "Failed")
-        edit(chat_id, message_id, reply_markup={"inline_keyboard": [[
-            {"text": f"✅ Selected option {val}" if ok else "⚠️ Failed to send",
-             "callback_data": "noop"}]]})
+        rebuild_status(chat_id, message_id, full,
+                       note=f"✅ Selected option {val}" if ok
+                            else f"⚠️ Failed to select option {val}")
         return
 
     # New-session / folder picker flow.
