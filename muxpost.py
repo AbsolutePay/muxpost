@@ -434,17 +434,19 @@ def render_pane(pane):
     """
     if pane is None:
         return "<i>(could not capture pane)</i>"
-    tag = "blockquote expandable" if setting("pane_view") == "expandable" else "blockquote"
+    # Open tag may carry the 'expandable' attribute; the close tag is always
+    # plain </blockquote> (the attribute on a close tag is invalid HTML).
+    open_tag = "blockquote expandable" if setting("pane_view") == "expandable" else "blockquote"
     lines = clean_pane(pane).split("\n")
     if not lines or not any(l.strip() for l in lines):
-        return f"<{tag}><i>(empty)</i></{tag}>"
+        return f"<{open_tag}><i>(empty)</i></blockquote>"
     n = setting("pane_lines")
     if len(lines) > n:
         lines = lines[-n:]
     body = "\n".join(lines)
     if len(body) > MAX_CHARS:
         body = body[-MAX_CHARS:]
-    return f"<{tag}>{html.escape(body)}</{tag}>"
+    return f"<{open_tag}>{html.escape(body)}</blockquote>"
 
 
 def status_text(full, pane, header_emoji="🖥"):
