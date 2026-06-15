@@ -467,22 +467,24 @@ def detect_menu(pane):
 
 
 def action_keyboard(full, pane):
-    """Context buttons for a report/status: menu options, or a queued message."""
+    """Context buttons for a report/status: menu options or a queued message,
+    plus a Refresh button that re-captures the pane."""
+    disp = display_name(full)
+    rows = []
     opts = detect_menu(pane)
     if opts:
-        rows = []
         for num, label in opts:
             t = f"{num}. {label}"
             rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
-                          "callback_data": f"o|{display_name(full)}|{num}"}])
-        return {"inline_keyboard": rows}
-    q = detect_queue(pane)
-    if q:
-        label = q if len(q) <= 40 else q[:39] + "…"
-        return {"inline_keyboard": [[
-            {"text": f"▶️ Send queued: {label}", "callback_data": f"q|{display_name(full)}"}
-        ]]}
-    return None
+                          "callback_data": f"o|{disp}|{num}"}])
+    else:
+        q = detect_queue(pane)
+        if q:
+            label = q if len(q) <= 40 else q[:39] + "…"
+            rows.append([{"text": f"▶️ Send queued: {label}",
+                          "callback_data": f"q|{disp}"}])
+    rows.append([{"text": "🔄 Refresh", "callback_data": f"rf|{disp}"}])
+    return {"inline_keyboard": rows}
 
 
 def build_keyboard(tag, sessions, page):
@@ -918,6 +920,22 @@ def handle_callback(cq):
         return
     tag, kind = parts[0], parts[1]
     val = parts[2] if len(parts) > 2 else ""
+
+    # Refresh: re-capture the pane and rebuild this status/report message.
+    if tag == "rf":
+        full = full_name(kind)
+        if not session_exists(full):
+            answer(cq["id"], "Session is gone")
+            edit(chat_id, message_id, reply_markup=None)
+            return
+        pane = capture_pane(full)
+        ts = time.strftime("%H:%M:%S")
+        text = status_text(full, pane) + f"\n<i>🔄 Refreshed {ts}</i>"
+        edit(chat_id, message_id, text=text,
+             reply_markup=action_keyboard(full, pane))
+        MSG_SESSION[message_id] = full
+        answer(cq["id"], "Refreshed")
+        return
 
     # Send a queued/suggested message Claude staged in the prompt.
     if tag == "q":
