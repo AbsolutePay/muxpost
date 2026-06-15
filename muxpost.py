@@ -366,7 +366,11 @@ def session_from_reply(reply):
 # Formatting
 # --------------------------------------------------------------------------
 
-MAX_LINES = 60
+# The pane renders as a plain (non-collapsed) blockquote — always fully shown,
+# so a refresh never collapses it. We trim to a short tail (the latest lines)
+# to keep the message compact; the menu buttons still carry every option even
+# if the menu's top scrolls past this window.
+TAIL_LINES = 15
 MAX_CHARS = 3500
 
 
@@ -411,18 +415,22 @@ def clean_pane(text):
 
 
 def render_pane(pane):
-    """Clean the capture, trim to the last lines, wrap in an expandable quote."""
+    """Clean the capture, trim to the latest lines, wrap in a plain quote.
+
+    A non-collapsed blockquote is always fully shown, so refreshing never
+    collapses it — no re-expanding or scrolling to reach the latest output.
+    """
     if pane is None:
         return "<i>(could not capture pane)</i>"
     lines = clean_pane(pane).split("\n")
     if not lines or not any(l.strip() for l in lines):
-        return "<blockquote expandable><i>(empty)</i></blockquote>"
-    if len(lines) > MAX_LINES:
-        lines = lines[-MAX_LINES:]
+        return "<blockquote><i>(empty)</i></blockquote>"
+    if len(lines) > TAIL_LINES:
+        lines = lines[-TAIL_LINES:]
     body = "\n".join(lines)
     if len(body) > MAX_CHARS:
         body = body[-MAX_CHARS:]
-    return f"<blockquote expandable>{html.escape(body)}</blockquote>"
+    return f"<blockquote>{html.escape(body)}</blockquote>"
 
 
 def status_text(full, pane, header_emoji="🖥"):
