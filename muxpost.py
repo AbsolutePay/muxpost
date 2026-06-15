@@ -264,8 +264,14 @@ def send_queued(session):
 
 
 def send_interrupt(session):
-    """Interrupt Claude's current run — the TUI's 'esc to interrupt'."""
-    return _tmux(["send-keys", "-t", session, "Escape"]).returncode == 0
+    """Interrupt Claude's current run — the TUI's 'esc to interrupt'.
+
+    Sends Escape twice: the first stops an in-progress run, the second clears a
+    half-typed prompt / dismisses any leftover menu.
+    """
+    ok = _tmux(["send-keys", "-t", session, "Escape"]).returncode == 0
+    ok = _tmux(["send-keys", "-t", session, "Escape"]).returncode == 0 and ok
+    return ok
 
 
 def session_exists(full):
