@@ -554,6 +554,7 @@ def build_dir_keyboard(dirs, page):
     if nav:
         rows.append(nav)
     rows.append([{"text": "➕ Create new folder", "callback_data": "nw|c|0"}])
+    rows.append([{"text": "✖️ Cancel", "callback_data": "nw|x|0"}])
     return {"inline_keyboard": rows}
 
 
@@ -776,12 +777,13 @@ def monitor_tick():
 # --------------------------------------------------------------------------
 
 
-def show_selection(chat_id, tag, prompt):
+def show_selection(chat_id, tag, prompt, reply_to=None):
     sessions = sessions_by_recency()
     if not sessions:
         send(chat_id, "No matching tmux sessions found.")
         return
-    send(chat_id, prompt, reply_markup=build_keyboard(tag, sessions, 0))
+    send(chat_id, prompt, reply_markup=build_keyboard(tag, sessions, 0),
+         reply_to=reply_to)
 
 
 def handle_message(msg):
@@ -949,7 +951,8 @@ def handle_message(msg):
     # 3) Plain text with no reply -> ask which session to send it to.
     if text.strip():
         PENDING[chat_id] = text
-        show_selection(chat_id, "sn", "Send this to which session?")
+        show_selection(chat_id, "sn", "Send this to which session?",
+                       reply_to=msg["message_id"])
 
 
 def handle_callback(cq):
@@ -1024,11 +1027,14 @@ def handle_callback(cq):
             PENDING_NEW.pop(chat_id, None)
             edit(chat_id, message_id,
                  text="✏️ Send a name for the new folder, created under "
-                      f"<code>{html.escape(PROJECT_ROOT)}</code>.")
+                      f"<code>{html.escape(PROJECT_ROOT)}</code>.",
+                 reply_markup={"inline_keyboard": [[
+                     {"text": "✖️ Cancel", "callback_data": "nw|x|0"}]]})
             answer(cq["id"])
             return
-        if kind == "x":  # cancel a pending create-confirm
+        if kind == "x":  # cancel a pending create-confirm / name entry
             PENDING_NEW.pop(chat_id, None)
+            NEW_DIR_WAIT.pop(chat_id, None)
             edit(chat_id, message_id, text="✖️ Cancelled.")
             answer(cq["id"])
             return
