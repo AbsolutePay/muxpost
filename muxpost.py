@@ -542,6 +542,13 @@ def action_keyboard(full, pane):
                 t = f"{'☑' if o['check'] else '☐'} {o['num']}. {o['label']}"
             rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
                           "callback_data": f"o|{disp}|{o['num']}"}])
+        # "Chat about this" is sometimes a numbered option, sometimes an
+        # unnumbered escape at the very bottom. Add a button for the unnumbered
+        # case (it can't be reached by a number key).
+        labels = {o["label"].lower() for o in opts}
+        if "chat about this" not in labels and re.search(
+                r"(?mi)^[ \t]*(?:❯[ \t]*)?chat about this[ \t]*$", pane):
+            rows.append([{"text": "💬 Chat about this", "callback_data": f"o|{disp}|chat"}])
         if checkbox:
             # Checkbox multi-select: a number toggles, Enter toggles the
             # highlighted box. Commit by moving right to the Submit tab + Enter.
@@ -1072,6 +1079,11 @@ def handle_callback(cq):
             ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
         elif val == "Enter":         # enriched wizard: Enter commits the question
             ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
+        elif val == "chat":          # unnumbered "Chat about this": it's the
+            # bottom-most item and Down clamps there, so over-step then Enter.
+            n = len(detect_menu(capture_pane(full)) or [])
+            _tmux(["send-keys", "-t", full] + ["Down"] * (n + 3))
+            ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
         else:                        # a number: select / toggle
             ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
         if ok:
@@ -1079,6 +1091,9 @@ def handle_callback(cq):
         if val in ("Submit", "Enter"):
             answer(cq["id"], "Submitted ✓" if ok else "Failed")
             note = "✅ Submitted" if ok else "⚠️ Failed to submit"
+        elif val == "chat":
+            answer(cq["id"], "Chat about this ✓" if ok else "Failed")
+            note = "💬 Chat about this" if ok else "⚠️ Failed"
         else:
             answer(cq["id"], f"Sent {val} ✓" if ok else "Failed")
             note = f"✅ Sent option {val}" if ok else f"⚠️ Failed to send {val}"
