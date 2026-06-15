@@ -537,18 +537,32 @@ def detect_menu(pane):
     return opts or None
 
 
-def has_submit_tab(pane):
-    """True if the pane shows a multi-step wizard header with a 'Submit' tab.
+def needs_explicit_submit(pane):
+    """True for Claude's form/wizard select, where a number only *highlights*
+    and you press Enter to commit — as opposed to a plain select that submits
+    on the number press.
 
-    e.g. '←  ☒ Onboarding depth  ☐ Root + switching  ✔ Submit  →'. These menus
-    don't commit on a number press — that only selects/toggles — so they need an
-    explicit submit. (The bare 'Submit' line under an option has no ☐/☒ tab
-    marker, so it won't false-positive.)
+    These render a ballot-box step header ('☐ Next step', or a multi-tab
+    '←  ☒ Onboarding  ☐ Root  ✔ Submit  →') and offer 'add notes' / 'switch
+    questions' affordances in the footer. A plain Yes/No select shows none of
+    that. We look at the bottom region only so a checklist earlier in the
+    conversation can't trigger it.
     """
     if not pane:
         return False
-    return any(("Submit" in ln and ("☐" in ln or "☒" in ln))
-               for ln in pane.split("\n"))
+    lines = pane.split("\n")
+    footer = "\n".join([l for l in lines if l.strip()][-3:])
+    if "to add notes" in footer or "to switch questions" in footer:
+        return True
+    # Fallback: a ballot-box step header ('☐ Next step', '←  ☒ A  ☐ B  →') sits
+    # right under the menu's divider rule — a conversation checklist never does.
+    prev = ""
+    for ln in lines:
+        if ("☐" in ln or "☒" in ln) and _is_divider(prev):
+            return True
+        if ln.strip():
+            prev = ln
+    return False
 
 
 def action_keyboard(full, pane):
@@ -577,9 +591,9 @@ def action_keyboard(full, pane):
             # Checkbox multi-select: a number toggles, Enter toggles the
             # highlighted box. Commit by moving right to the Submit tab + Enter.
             rows.append([{"text": "✅ Submit", "callback_data": f"o|{disp}|Submit"}])
-        elif has_submit_tab(pane):
-            # Enriched radio wizard: a number only selects the current question;
-            # Enter commits it (and advances to the next question).
+        elif needs_explicit_submit(pane):
+            # Form/wizard select: a number only highlights the current question;
+            # Enter commits it (and advances to the next, if any).
             rows.append([{"text": "⏎ Submit", "callback_data": f"o|{disp}|Enter"}])
     else:
         q = detect_queue(pane)
