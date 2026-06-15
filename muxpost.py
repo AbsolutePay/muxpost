@@ -679,9 +679,33 @@ def do_new(chat_id, name, workdir, reply_to=None):
 # --------------------------------------------------------------------------
 
 
+def _normalize_menu_state(pane):
+    """Blank a menu's selection state for idle-hashing.
+
+    Cursor position, checkbox marks, wizard-tab progress, and the selection-
+    driven preview box all change as you check/navigate options — but that's
+    you fiddling, not new activity, so it shouldn't reset idle tracking and fire
+    another notification. Drop those, and blank lines (preview height varies per
+    option), leaving the question + option labels as the stable signature.
+    """
+    out = []
+    for line in pane.split("\n"):
+        line = re.split(r"[─-╿]", line)[0]               # preview-box / framed art
+        line = line.replace("❯", " ")                    # navigation cursor
+        line = re.sub(r"\[[ xX✔✗]\]", "[]", line)        # checkbox state
+        line = line.replace("☒", "☐").replace("✔", "☐")  # wizard-tab progress
+        line = " ".join(line.split())  # collapse spacing (cursor shifts indent)
+        if line:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _pane_hash(pane):
-    # stable across processes (unlike hash()) so persisted state survives restarts
-    return hashlib.sha1(pane.encode("utf-8", "replace")).hexdigest()
+    # stable across processes (unlike hash()) so persisted state survives restarts.
+    # While a menu is up, hash with its selection state normalized away, so
+    # checking/toggling options doesn't reset idle tracking and re-notify.
+    text = _normalize_menu_state(pane) if detect_menu(pane) else pane
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
 
 
 def load_state():
