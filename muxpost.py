@@ -493,13 +493,16 @@ def detect_menu(pane):
         return None
     opts = []
     for line in reversed(lines):
-        m = re.match(r"^(?:❯ |  )(\d+)\.\s+(.+)$", line)
+        # Leading marker is '❯ ' (highlighted) or a little whitespace; enriched
+        # menus indent non-highlighted options by a single space.
+        m = re.match(r"^\s{0,3}(?:❯\s+)?(\d+)\.\s+(.+)$", line)
         if not m:
             continue
         num = int(m.group(1))
         if opts and num != opts[-1]["num"] - 1:
             break                    # sequence broke — top of the menu reached
-        label = m.group(2).strip()
+        # Drop any preview-box art that shares the option's line (┌ │ └ …).
+        label = re.split(r"[─-╿]", m.group(2))[0].strip()
         check = None
         cb = re.match(r"^\[(.)\]\s*(.*)$", label)  # '[✔] …' / '[ ] …' checkbox
         if cb:
@@ -510,6 +513,20 @@ def detect_menu(pane):
     return opts or None
 
 
+def has_submit_tab(pane):
+    """True if the pane shows a multi-step wizard header with a 'Submit' tab.
+
+    e.g. '←  ☒ Onboarding depth  ☐ Root + switching  ✔ Submit  →'. These menus
+    don't commit on a number press — that only selects/toggles — so they need an
+    explicit submit. (The bare 'Submit' line under an option has no ☐/☒ tab
+    marker, so it won't false-positive.)
+    """
+    if not pane:
+        return False
+    return any(("Submit" in ln and ("☐" in ln or "☒" in ln))
+               for ln in pane.split("\n"))
+
+
 def action_keyboard(full, pane):
     """Context buttons for a report/status: menu options or a queued message,
     plus a Refresh button that re-captures the pane."""
@@ -517,7 +534,7 @@ def action_keyboard(full, pane):
     rows = []
     opts = detect_menu(pane)
     if opts:
-        multi = any(o["check"] is not None for o in opts)
+        checkbox = any(o["check"] is not None for o in opts)
         for o in opts:
             if o["check"] is None:
                 t = f"{o['num']}. {o['label']}"
@@ -525,10 +542,14 @@ def action_keyboard(full, pane):
                 t = f"{'☑' if o['check'] else '☐'} {o['num']}. {o['label']}"
             rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
                           "callback_data": f"o|{disp}|{o['num']}"}])
-        if multi:
-            # Checkboxes only toggle (Enter toggles the highlighted one). To
-            # commit you move right to the "Submit" tab, then Enter.
+        if checkbox:
+            # Checkbox multi-select: a number toggles, Enter toggles the
+            # highlighted box. Commit by moving right to the Submit tab + Enter.
             rows.append([{"text": "✅ Submit", "callback_data": f"o|{disp}|Submit"}])
+        elif has_submit_tab(pane):
+            # Enriched radio wizard: a number only selects the current question;
+            # Enter commits it (and advances to the next question).
+            rows.append([{"text": "⏎ Submit", "callback_data": f"o|{disp}|Enter"}])
     else:
         q = detect_queue(pane)
         if q:
@@ -1046,14 +1067,16 @@ def handle_callback(cq):
             answer(cq["id"], "Session is gone")
             edit(chat_id, message_id, reply_markup=None)
             return
-        if val == "Submit":
+        if val == "Submit":          # checkbox menu: go to Submit tab, then Enter
             _tmux(["send-keys", "-t", full, "Right"])
             ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
-        else:
+        elif val == "Enter":         # enriched wizard: Enter commits the question
+            ok = _tmux(["send-keys", "-t", full, "Enter"]).returncode == 0
+        else:                        # a number: select / toggle
             ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
         if ok:
             mark_sent(full)
-        if val == "Submit":
+        if val in ("Submit", "Enter"):
             answer(cq["id"], "Submitted ✓" if ok else "Failed")
             note = "✅ Submitted" if ok else "⚠️ Failed to submit"
         else:
