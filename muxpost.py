@@ -468,11 +468,13 @@ def detect_queue(pane):
 
 
 def detect_menu(pane):
-    """Return [(num, label), …] if an interactive selection menu is showing.
+    """Return [{num, label, check}, …] if a selection menu is showing, else None.
 
     Claude renders a numbered menu ('❯ 1. …', '  2. …') with an
-    'Enter to select · ↑/↓ to navigate · Esc to cancel' footer; pressing the
-    number selects that option. Description lines (deeper indent) are ignored.
+    'Enter to select · ↑/↓ to navigate · Esc to cancel' footer. `check` is
+    None for a single-select option, or True/False for a multi-select checkbox
+    ('1. [✔] …' / '2. [ ] …') — multi-select toggles per keypress and commits
+    on Enter. Description lines (deeper indent) are ignored.
 
     Only the menu at the very bottom counts. Options are numbered 1..N
     top-to-bottom, so walking up from the footer they descend by exactly 1 —
@@ -495,9 +497,15 @@ def detect_menu(pane):
         if not m:
             continue
         num = int(m.group(1))
-        if opts and num != int(opts[-1][0]) - 1:
+        if opts and num != opts[-1]["num"] - 1:
             break                    # sequence broke — top of the menu reached
-        opts.append((m.group(1), m.group(2).strip()))
+        label = m.group(2).strip()
+        check = None
+        cb = re.match(r"^\[(.)\]\s*(.*)$", label)  # '[✔] …' / '[ ] …' checkbox
+        if cb:
+            check = cb.group(1).strip() != ""      # any non-blank mark = checked
+            label = cb.group(2).strip()
+        opts.append({"num": num, "label": label, "check": check})
     opts.reverse()
     return opts or None
 
@@ -509,10 +517,17 @@ def action_keyboard(full, pane):
     rows = []
     opts = detect_menu(pane)
     if opts:
-        for num, label in opts:
-            t = f"{num}. {label}"
+        multi = any(o["check"] is not None for o in opts)
+        for o in opts:
+            if o["check"] is None:
+                t = f"{o['num']}. {o['label']}"
+            else:
+                t = f"{'☑' if o['check'] else '☐'} {o['num']}. {o['label']}"
             rows.append([{"text": t if len(t) <= 45 else t[:44] + "…",
-                          "callback_data": f"o|{disp}|{num}"}])
+                          "callback_data": f"o|{disp}|{o['num']}"}])
+        if multi:
+            # Checkboxes only toggle; Enter commits the whole selection.
+            rows.append([{"text": "✅ Submit", "callback_data": f"o|{disp}|Enter"}])
     else:
         q = detect_queue(pane)
         if q:
@@ -1020,7 +1035,9 @@ def handle_callback(cq):
                             else "⚠️ Failed to send queued message")
         return
 
-    # Pick an option from a Claude selection menu (press the number).
+    # Drive a Claude selection menu: a number selects (single-select) or toggles
+    # a checkbox (multi-select); "Enter" commits a multi-select. rebuild_status
+    # re-captures, so a toggled ☐→☑ shows immediately.
     if tag == "o":
         full = full_name(kind)
         if not session_exists(full):
@@ -1030,10 +1047,13 @@ def handle_callback(cq):
         ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
         if ok:
             mark_sent(full)
-        answer(cq["id"], f"Selected {val} ✓" if ok else "Failed")
-        rebuild_status(chat_id, message_id, full,
-                       note=f"✅ Selected option {val}" if ok
-                            else f"⚠️ Failed to select option {val}")
+        if val == "Enter":
+            answer(cq["id"], "Submitted ✓" if ok else "Failed")
+            note = "✅ Submitted" if ok else "⚠️ Failed to submit"
+        else:
+            answer(cq["id"], f"Sent {val} ✓" if ok else "Failed")
+            note = f"✅ Sent option {val}" if ok else f"⚠️ Failed to send {val}"
+        rebuild_status(chat_id, message_id, full, note=note)
         return
 
     # New-session / folder picker flow.
