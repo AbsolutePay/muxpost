@@ -78,6 +78,22 @@ SNAPSHOT_INTERVAL = float(_conf("TG_SNAPSHOT_INTERVAL", "snapshot_interval", 300
 
 API = f"https://api.telegram.org/bot{TOKEN}"
 
+# User-tunable settings (via the /setting menu in Telegram). Each cycles through
+# `values` on tap; the first runtime default falls back to the configured value.
+SETTINGS_SPEC = {
+    "pane_view":  {"label": "📜 Pane view",      "values": ["expandable", "compact"]},
+    "pane_lines": {"label": "📏 Pane lines",      "values": [15, 30, 60]},
+    "idle_ticks": {"label": "🔔 Notify after ticks", "values": [2, 3, 4, 5]},
+}
+SETTINGS_DEFAULTS = {"pane_view": "expandable", "pane_lines": 60, "idle_ticks": IDLE_TICKS}
+SETTINGS = {}  # overrides loaded from SETTINGS_FILE
+
+
+def setting(key):
+    """Current value of a setting: user override, else the default."""
+    val = SETTINGS.get(key)
+    return val if val is not None else SETTINGS_DEFAULTS[key]
+
 
 def require_config():
     if not TOKEN or not USER_ID:
@@ -96,6 +112,7 @@ NOTIFY_FILE = os.path.join(STATE_DIR, "notify.json")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 LAST_SENT_FILE = os.path.join(STATE_DIR, "last_sent.json")
 OFFSET_FILE = os.path.join(STATE_DIR, "offset.json")
+SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
 SNAPSHOT_FILE = os.path.join(STATE_DIR, "sessions_snapshot.json")
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
@@ -366,12 +383,7 @@ def session_from_reply(reply):
 # Formatting
 # --------------------------------------------------------------------------
 
-# The pane renders as a plain (non-collapsed) blockquote — always fully shown,
-# so a refresh never collapses it. We trim to a short tail (the latest lines)
-# to keep the message compact; the menu buttons still carry every option even
-# if the menu's top scrolls past this window.
-TAIL_LINES = 15
-MAX_CHARS = 3500
+MAX_CHARS = 3500  # hard cap on pane text length (Telegram message budget)
 
 
 def _is_divider(line):
@@ -415,22 +427,24 @@ def clean_pane(text):
 
 
 def render_pane(pane):
-    """Clean the capture, trim to the latest lines, wrap in a plain quote.
+    """Clean the capture, trim to the latest lines, wrap in a blockquote.
 
-    A non-collapsed blockquote is always fully shown, so refreshing never
-    collapses it — no re-expanding or scrolling to reach the latest output.
+    Whether the quote is expandable (collapsed by default) or always shown, and
+    how many lines it keeps, are user settings (/setting).
     """
     if pane is None:
         return "<i>(could not capture pane)</i>"
+    tag = "blockquote expandable" if setting("pane_view") == "expandable" else "blockquote"
     lines = clean_pane(pane).split("\n")
     if not lines or not any(l.strip() for l in lines):
-        return "<blockquote><i>(empty)</i></blockquote>"
-    if len(lines) > TAIL_LINES:
-        lines = lines[-TAIL_LINES:]
+        return f"<{tag}><i>(empty)</i></{tag}>"
+    n = setting("pane_lines")
+    if len(lines) > n:
+        lines = lines[-n:]
     body = "\n".join(lines)
     if len(body) > MAX_CHARS:
         body = body[-MAX_CHARS:]
-    return f"<blockquote>{html.escape(body)}</blockquote>"
+    return f"<{tag}>{html.escape(body)}</{tag}>"
 
 
 def status_text(full, pane, header_emoji="🖥"):
@@ -738,6 +752,50 @@ def save_state():
         pass
 
 
+def load_settings():
+    """Restore user settings overrides from disk (validated against the spec)."""
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict):
+        for key, spec in SETTINGS_SPEC.items():
+            if key in data and data[key] in spec["values"]:
+                SETTINGS[key] = data[key]
+
+
+def save_settings():
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(SETTINGS, fh)
+        os.replace(tmp, SETTINGS_FILE)
+    except OSError:
+        pass
+
+
+def cycle_setting(key):
+    """Advance a setting to its next value (wrapping) and persist it."""
+    values = SETTINGS_SPEC[key]["values"]
+    try:
+        nxt = values[(values.index(setting(key)) + 1) % len(values)]
+    except ValueError:
+        nxt = values[0]
+    SETTINGS[key] = nxt
+    save_settings()
+    return nxt
+
+
+def settings_keyboard():
+    """One button per setting (shows current value, taps to cycle) + Close."""
+    rows = [[{"text": f"{spec['label']}: {setting(key)}", "callback_data": f"set|{key}"}]
+            for key, spec in SETTINGS_SPEC.items()]
+    rows.append([{"text": "✖️ Close", "callback_data": "set|close"}])
+    return {"inline_keyboard": rows}
+
+
 def load_offset():
     """Restore the Telegram getUpdates offset, or None if unset.
 
@@ -850,14 +908,15 @@ def monitor_tick():
             continue
         digest = _pane_hash(pane)
         st = STATE.get(session)
+        idle_ticks = setting("idle_ticks")
         if st is None:
             # First time we see this session (fresh start or newly created):
             # treat whatever is on screen now as a baseline — don't notify it.
-            STATE[session] = {"hash": digest, "count": IDLE_TICKS, "reported": True}
+            STATE[session] = {"hash": digest, "count": idle_ticks, "reported": True}
             continue
         if digest == st["hash"]:
             st["count"] += 1
-            if st["count"] == IDLE_TICKS and not st["reported"]:
+            if st["count"] >= idle_ticks and not st["reported"]:
                 st["reported"] = True
                 mid = send(USER_ID, status_text(session, pane, "💤"),
                            reply_markup=action_keyboard(session, pane))
@@ -942,6 +1001,7 @@ def handle_message(msg):
             "<code>/stop &lt;name&gt;</code> directly.\n"
             "• <code>/kill</code> — pick a session to kill (asks to confirm).\n"
             "• <code>/kill &lt;name&gt;</code> — kill one directly (asks to confirm).\n"
+            "• <code>/setting</code> — configure pane view, notify threshold, etc.\n"
             "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
             "• Send plain text — I'll ask which session to send it to.",
         )
@@ -1045,6 +1105,11 @@ def handle_message(msg):
             show_selection(chat_id, "sp", "Select a session to interrupt:")
         return
 
+    if text.startswith("/setting"):
+        send(chat_id, "⚙️ <b>Settings</b>\nTap a row to change it.",
+             reply_markup=settings_keyboard())
+        return
+
     if text.startswith("/"):
         send(chat_id, "Unknown command. Try /help.")
         return
@@ -1070,6 +1135,20 @@ def handle_callback(cq):
         return
     tag, kind = parts[0], parts[1]
     val = parts[2] if len(parts) > 2 else ""
+
+    # Settings: cycle a setting in place, or close the menu.
+    if tag == "set":
+        if kind == "close":
+            edit(chat_id, message_id, text="⚙️ Settings closed.", reply_markup=None)
+            answer(cq["id"])
+            return
+        if kind in SETTINGS_SPEC:
+            newval = cycle_setting(kind)
+            edit(chat_id, message_id, reply_markup=settings_keyboard())
+            answer(cq["id"], f"{SETTINGS_SPEC[kind]['label']}: {newval}")
+            return
+        answer(cq["id"])
+        return
 
     # Refresh: re-capture the pane and rebuild this status/report message.
     if tag == "rf":
@@ -1369,6 +1448,7 @@ BOT_COMMANDS = [
     {"command": "new", "description": "Start a new claude session"},
     {"command": "stop", "description": "Interrupt Claude in a session (or pick one)"},
     {"command": "kill", "description": "Kill a session (or pick one)"},
+    {"command": "setting", "description": "Configure muxpost (pane view, notify, …)"},
     {"command": "restart", "description": "Restart muxpost"},
     {"command": "upgrade", "description": "Update muxpost, then restart"},
     {"command": "help", "description": "Show what muxpost can do"},
@@ -1395,6 +1475,7 @@ def main():
     register_commands()
     load_state()  # restore report flags so a restart doesn't re-notify
     load_last_sent()  # restore picker ordering (last message sent per session)
+    load_settings()  # restore user settings (pane view, notify threshold, …)
 
     # record our PID and install an in-place restart on SIGHUP
     try:
