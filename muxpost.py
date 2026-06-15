@@ -533,6 +533,7 @@ def build_keyboard(tag, sessions, page):
         nav.append({"text": "▶️", "callback_data": f"{tag}|p|{page + 1}"})
     if nav:
         rows.append(nav)
+    rows.append([{"text": "✖️ Cancel", "callback_data": f"{tag}|c"}])
     return {"inline_keyboard": rows}
 
 
@@ -1092,6 +1093,13 @@ def handle_callback(cq):
                       else f"⚠️ Failed to kill <b>{disp}</b>.")
             answer(cq["id"], "Killed" if ok else "Failed")
             return
+
+    # Cancel a picker (status / send / kill / stop).
+    if kind == "c":
+        PENDING.pop(chat_id, None)
+        edit(chat_id, message_id, text="✖️ Cancelled.")
+        answer(cq["id"])
+        return
 
     # Pagination.
     if kind == "p":
