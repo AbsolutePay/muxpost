@@ -263,6 +263,11 @@ def send_queued(session):
     return ok
 
 
+def send_interrupt(session):
+    """Interrupt Claude's current run — the TUI's 'esc to interrupt'."""
+    return _tmux(["send-keys", "-t", session, "Escape"]).returncode == 0
+
+
 def session_exists(full):
     return _tmux(["has-session", "-t", full]).returncode == 0
 
@@ -823,6 +828,8 @@ def handle_message(msg):
             "• <code>/new &lt;name&gt; [path]</code> — start one directly.\n"
             "• <code>/status</code> — pick a session to inspect.\n"
             "• <code>/status &lt;name&gt;</code> — inspect one directly.\n"
+            "• <code>/stop</code> — interrupt Claude (pick one), or "
+            "<code>/stop &lt;name&gt;</code> directly.\n"
             "• <code>/kill</code> — pick a session to kill (asks to confirm).\n"
             "• <code>/kill &lt;name&gt;</code> — kill one directly (asks to confirm).\n"
             "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
@@ -910,6 +917,22 @@ def handle_message(msg):
                  reply_markup=kill_confirm_kb(display_name(full)))
         else:
             show_selection(chat_id, "kl", "Select a session to kill:")
+        return
+
+    if text.startswith("/stop"):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            disp = parts[1].strip()
+            full = full_name(disp)
+            if full not in set(list_sessions()):
+                send(chat_id, f"No session named <b>{html.escape(disp)}</b>.")
+                return
+            ok = send_interrupt(full)
+            send(chat_id,
+                 f"⏹ Interrupted <b>{html.escape(display_name(full))}</b>." if ok
+                 else f"⚠️ Failed to interrupt <b>{html.escape(display_name(full))}</b>.")
+        else:
+            show_selection(chat_id, "sp", "Select a session to interrupt:")
         return
 
     if text.startswith("/"):
@@ -1108,6 +1131,15 @@ def handle_callback(cq):
             answer(cq["id"])
             return
 
+        if tag == "sp":
+            ok = send_interrupt(full)
+            disp = html.escape(display_name(full))
+            edit(chat_id, message_id,
+                 text=f"⏹ Interrupted <b>{disp}</b>." if ok
+                      else f"⚠️ Failed to interrupt <b>{disp}</b>.")
+            answer(cq["id"], "Interrupted" if ok else "Failed")
+            return
+
     answer(cq["id"])
 
 
@@ -1194,6 +1226,7 @@ def restart_inplace():
 BOT_COMMANDS = [
     {"command": "status", "description": "Inspect a session (or pick one)"},
     {"command": "new", "description": "Start a new claude session"},
+    {"command": "stop", "description": "Interrupt Claude in a session (or pick one)"},
     {"command": "kill", "description": "Kill a session (or pick one)"},
     {"command": "restart", "description": "Restart muxpost"},
     {"command": "upgrade", "description": "Update muxpost, then restart"},
