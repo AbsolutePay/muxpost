@@ -133,6 +133,8 @@ PENDING = {}
 NEW_DIR_WAIT = {}
 # chat_id -> {"name", "workdir"} awaiting a create-folder confirmation
 PENDING_NEW = {}
+# chat_id -> current directory being browsed by /getfile
+GETFILE_DIR = {}
 
 # --------------------------------------------------------------------------
 # Telegram API helpers
@@ -201,6 +203,58 @@ def edit(chat_id, message_id, text=None, reply_markup=None):
 
 def answer(callback_id, text=None):
     api("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
+
+DOC_MAX_BYTES = 50 * 1024 * 1024  # Telegram bot upload limit
+
+
+def send_document(chat_id, path, caption=None):
+    """Upload a local file to the chat via sendDocument (multipart/form-data).
+
+    api() is urlencoded and can't carry a file, so we build the multipart body
+    by hand (stdlib only). Returns (ok, error_message).
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        return False, str(exc)
+    if size > DOC_MAX_BYTES:
+        return False, f"file is {size // (1024 * 1024)} MB (Telegram limit is 50 MB)"
+    boundary = "muxpost" + os.urandom(16).hex()
+    bb = boundary.encode()
+    fname = os.path.basename(path).replace('"', "_") or "file"
+    out = []
+
+    def _field(name, value):
+        out.append(b"--" + bb + b"\r\n")
+        out.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        out.append(str(value).encode() + b"\r\n")
+
+    _field("chat_id", chat_id)
+    if caption:
+        _field("caption", caption)
+        _field("parse_mode", "HTML")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return False, str(exc)
+    out.append(b"--" + bb + b"\r\n")
+    out.append(
+        f'Content-Disposition: form-data; name="document"; filename="{fname}"\r\n'.encode()
+    )
+    out.append(b"Content-Type: application/octet-stream\r\n\r\n")
+    out.append(data + b"\r\n")
+    out.append(b"--" + bb + b"--\r\n")
+    req = urllib.request.Request(f"{API}/sendDocument", data=b"".join(out))
+    req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            res = json.load(resp)
+        return bool(res.get("ok")), res.get("description", "")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] sendDocument failed: {exc}", file=sys.stderr)
+        return False, str(exc)
 
 
 # --------------------------------------------------------------------------
@@ -671,6 +725,53 @@ CONFIRM_KB = {"inline_keyboard": [[
 ]]}
 
 
+def list_dir_entries(path):
+    """(dirs, files) in `path`, each sorted; dirs first. Empty on error."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return [], []
+    dirs, files = [], []
+    for n in names:
+        full = os.path.join(path, n)
+        (dirs if os.path.isdir(full) else files).append(n)
+    return sorted(dirs), sorted(files)
+
+
+def build_file_keyboard(path, page):
+    """File browser for /getfile: dirs to descend, files to upload, parent + nav.
+
+    Entries are addressed by their index in the combined (dirs + files) list so
+    long/odd names never blow the 64-byte callback_data limit.
+    """
+    dirs, files = list_dir_entries(path)
+    entries = [("d", d) for d in dirs] + [("f", f) for f in files]
+    pages = max(1, math.ceil(len(entries) / PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    rows = []
+    for i in range(start, min(start + PAGE_SIZE, len(entries))):
+        kind, name = entries[i]
+        icon = "📁" if kind == "d" else "📄"
+        label = f"{icon} {name}"
+        rows.append([{"text": label if len(label) <= 45 else label[:44] + "…",
+                      "callback_data": f"gf|{kind}|{i}"}])
+    if not entries:
+        rows.append([{"text": "(empty folder)", "callback_data": "gf|noop"}])
+    nav = []
+    if page > 0:
+        nav.append({"text": "◀️", "callback_data": f"gf|p|{page - 1}"})
+    if pages > 1:
+        nav.append({"text": f"{page + 1}/{pages}", "callback_data": f"gf|p|{page}"})
+    if page < pages - 1:
+        nav.append({"text": "▶️", "callback_data": f"gf|p|{page + 1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "⬆️ Parent", "callback_data": "gf|up"},
+                 {"text": "✖️ Cancel", "callback_data": "gf|x"}])
+    return {"inline_keyboard": rows}
+
+
 def kill_confirm_kb(disp):
     """Two-button confirm for killing the session named `disp`."""
     return {"inline_keyboard": [[
@@ -1017,6 +1118,8 @@ def handle_message(msg):
             "<code>/stop &lt;name&gt;</code> directly.\n"
             "• <code>/kill</code> — pick a session to kill (asks to confirm).\n"
             "• <code>/kill &lt;name&gt;</code> — kill one directly (asks to confirm).\n"
+            "• <code>/getfile</code> — browse from the project root and send a file here.\n"
+            "• <code>/getfile &lt;path&gt;</code> — send that file directly if it exists.\n"
             "• <code>/setting</code> — configure pane view, notify threshold, etc.\n"
             "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
             "• Send plain text — I'll ask which session to send it to.",
@@ -1124,6 +1227,28 @@ def handle_message(msg):
     if text.startswith("/setting"):
         send(chat_id, "⚙️ <b>Settings</b>\nTap a row to change it.",
              reply_markup=settings_keyboard())
+        return
+
+    if text.startswith("/getfile"):
+        parts = text.split(maxsplit=1)
+        root = PROJECT_ROOT or os.path.expanduser("~")
+        if len(parts) == 2:  # explicit path -> upload it if it exists
+            p = os.path.expanduser(parts[1].strip())
+            if not os.path.isabs(p):
+                p = os.path.join(root, p)
+            p = os.path.abspath(p)
+            if not os.path.isfile(p):
+                send(chat_id, f"No file at <code>{html.escape(p)}</code>.")
+                return
+            ok, err = send_document(chat_id, p,
+                                    caption=f"📄 <code>{html.escape(p)}</code>")
+            if not ok:
+                send(chat_id, f"⚠️ Couldn't send <code>{html.escape(p)}</code>"
+                              + (f": {html.escape(err)}" if err else "") + ".")
+        else:  # no path -> open the file browser at the project root
+            GETFILE_DIR[chat_id] = root
+            send(chat_id, f"📂 <code>{html.escape(root)}</code>\nPick a file to send:",
+                 reply_markup=build_file_keyboard(root, 0))
         return
 
     if text.startswith("/"):
@@ -1283,6 +1408,58 @@ def handle_callback(cq):
             answer(cq["id"])
             return
         answer(cq["id"])
+        return
+
+    # /getfile browser: descend dirs, go to parent, paginate, upload a file.
+    if tag == "gf":
+        if kind == "x":
+            GETFILE_DIR.pop(chat_id, None)
+            edit(chat_id, message_id, text="✖️ Cancelled.")
+            answer(cq["id"])
+            return
+        cur = GETFILE_DIR.get(chat_id)
+        if not cur:
+            edit(chat_id, message_id, text="⌛ That browse expired. Run /getfile again.")
+            answer(cq["id"])
+            return
+        if kind == "noop":
+            answer(cq["id"])
+            return
+        if kind == "p":
+            page = int(val) if val.isdigit() else 0
+            edit(chat_id, message_id, reply_markup=build_file_keyboard(cur, page))
+            answer(cq["id"])
+            return
+        if kind == "up":
+            cur = GETFILE_DIR[chat_id] = os.path.dirname(cur.rstrip("/")) or "/"
+            edit(chat_id, message_id,
+                 text=f"📂 <code>{html.escape(cur)}</code>\nPick a file to send:",
+                 reply_markup=build_file_keyboard(cur, 0))
+            answer(cq["id"])
+            return
+        # d (descend) / f (upload): resolve the index against a fresh listing.
+        dirs, files = list_dir_entries(cur)
+        entries = [("d", d) for d in dirs] + [("f", f) for f in files]
+        idx = int(val) if val.isdigit() else -1
+        if not (0 <= idx < len(entries)) or entries[idx][0] != kind:
+            edit(chat_id, message_id, reply_markup=build_file_keyboard(cur, 0))
+            answer(cq["id"], "Listing changed — refreshed")
+            return
+        target = os.path.join(cur, entries[idx][1])
+        if kind == "d":
+            cur = GETFILE_DIR[chat_id] = target
+            edit(chat_id, message_id,
+                 text=f"📂 <code>{html.escape(cur)}</code>\nPick a file to send:",
+                 reply_markup=build_file_keyboard(cur, 0))
+            answer(cq["id"])
+            return
+        # kind == "f": upload it
+        answer(cq["id"], "Uploading…")
+        ok, err = send_document(chat_id, target,
+                                caption=f"📄 <code>{html.escape(target)}</code>")
+        if not ok:
+            send(chat_id, f"⚠️ Couldn't send <code>{html.escape(target)}</code>"
+                          + (f": {html.escape(err)}" if err else "") + ".")
         return
 
     # Kill flow: pick -> confirm -> kill (pagination falls through to generic).
@@ -1464,6 +1641,7 @@ BOT_COMMANDS = [
     {"command": "new", "description": "Start a new claude session"},
     {"command": "stop", "description": "Interrupt Claude in a session (or pick one)"},
     {"command": "kill", "description": "Kill a session (or pick one)"},
+    {"command": "getfile", "description": "Send a file here (browse, or /getfile <path>)"},
     {"command": "setting", "description": "Configure muxpost (pane view, notify, …)"},
     {"command": "restart", "description": "Restart muxpost"},
     {"command": "upgrade", "description": "Update muxpost, then restart"},
