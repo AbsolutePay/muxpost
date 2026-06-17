@@ -75,8 +75,11 @@ def _allowed_path(path):
     """
     if not path:
         return None
-    p = os.path.abspath(os.path.expanduser(path))
     root = _root()
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):           # relative paths resolve against the root
+        p = os.path.join(root, p)
+    p = os.path.abspath(p)
     return p if p == root or p.startswith(root + os.sep) else None
 
 
