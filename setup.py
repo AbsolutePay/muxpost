@@ -11,6 +11,7 @@ Re-run any time; it keeps existing values unless you change them.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -166,5 +167,25 @@ try:
     subprocess.run(installer + [flag], check=False)
 except Exception as exc:  # noqa: BLE001
     print(f"(autostart step skipped: {exc})")
+
+# --- optional: register as an MCP server with Hermes -----------------------
+# Lets an AI agent message you / send you files THROUGH muxpost. Default: no.
+ENTRY = os.path.join(HERE, "muxpost.py")
+MCP_CMD = f"hermes mcp add muxpost --command {sys.executable} --args {ENTRY} mcp"
+mcp_ans = ask("\nRegister an MCP server so an AI agent (e.g. Hermes) can message you "
+              "/ send you files? (y/N)", "n")
+if mcp_ans.lower().startswith("y"):
+    hermes = shutil.which("hermes")
+    if hermes:
+        print("Registering muxpost with Hermes…")
+        try:
+            subprocess.run([hermes, "mcp", "add", "muxpost", "--command",
+                            sys.executable, "--args", ENTRY, "mcp"], check=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (couldn't run hermes: {exc})\n  do it manually: {MCP_CMD}")
+    else:
+        print(f"  'hermes' not found on PATH. Register later with:\n    {MCP_CMD}")
+else:
+    print(f"  (skipped) Expose it to an AI agent later with:\n    {MCP_CMD}")
 
 print("\nNext: muxpost doctor   then   muxpost")
