@@ -140,6 +140,7 @@ usage: muxpost <command>
   status     show version and whether the bot is running
   restore    recreate snapshot sessions that aren't running (resume claude)
   snapshot   record current claude-* sessions for later restore
+  mcp        run as an MCP server over stdio (agent -> user messaging)
   init       configure muxpost (token, user id, project root)
   doctor     run the preflight health check
   help       show this message
@@ -228,6 +229,9 @@ def cli():
     elif cmd == "snapshot":
         snapshot_sessions()
         print(f"snapshot written to {SNAPSHOT_FILE}")
+    elif cmd == "mcp":
+        from muxpost.mcp import serve
+        serve()
     elif cmd in ("init", "setup"):
         subprocess.run([sys.executable, os.path.join(ROOT, "setup.py")])
     elif cmd == "doctor":

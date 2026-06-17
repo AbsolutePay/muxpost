@@ -79,8 +79,8 @@ def answer(callback_id, text=None):
     api("answerCallbackQuery", callback_query_id=callback_id, text=text)
 
 
-def send_document(chat_id, path, caption=None):
-    """Upload a local file to the chat via sendDocument (multipart/form-data).
+def _upload(method, field, chat_id, path, caption=None):
+    """Upload a local file via a multipart Bot API method (sendDocument/sendPhoto).
 
     api() is urlencoded and can't carry a file, so we build the multipart body
     by hand (stdlib only). Returns (ok, error_message).
@@ -112,17 +112,27 @@ def send_document(chat_id, path, caption=None):
         return False, str(exc)
     out.append(b"--" + bb + b"\r\n")
     out.append(
-        f'Content-Disposition: form-data; name="document"; filename="{fname}"\r\n'.encode()
+        f'Content-Disposition: form-data; name="{field}"; filename="{fname}"\r\n'.encode()
     )
     out.append(b"Content-Type: application/octet-stream\r\n\r\n")
     out.append(data + b"\r\n")
     out.append(b"--" + bb + b"--\r\n")
-    req = urllib.request.Request(f"{API}/sendDocument", data=b"".join(out))
+    req = urllib.request.Request(f"{API}/{method}", data=b"".join(out))
     req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             res = json.load(resp)
         return bool(res.get("ok")), res.get("description", "")
     except Exception as exc:  # noqa: BLE001
-        print(f"[api] sendDocument failed: {exc}", file=sys.stderr)
+        print(f"[api] {method} failed: {exc}", file=sys.stderr)
         return False, str(exc)
+
+
+def send_document(chat_id, path, caption=None):
+    """Upload a local file to the chat as a document. Returns (ok, error)."""
+    return _upload("sendDocument", "document", chat_id, path, caption)
+
+
+def send_photo(chat_id, path, caption=None):
+    """Upload a local image to the chat with inline preview. Returns (ok, error)."""
+    return _upload("sendPhoto", "photo", chat_id, path, caption)
