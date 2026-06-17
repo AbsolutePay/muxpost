@@ -772,6 +772,38 @@ def build_file_keyboard(path, page):
     return {"inline_keyboard": rows}
 
 
+def session_cwd(full):
+    """The working directory of a session's active pane (its project folder)."""
+    p = _session_field(full, "#{pane_current_path}")
+    return p if p and os.path.isdir(p) else None
+
+
+def do_getfile(chat_id, text, root):
+    """Handle /getfile: upload an explicit path, or open the browser at `root`.
+
+    `root` is the project root for a bare /getfile, or a session's folder when
+    /getfile is sent as a reply to that session. Relative paths resolve there.
+    """
+    root = root or PROJECT_ROOT or os.path.expanduser("~")
+    parts = text.split(maxsplit=1)
+    if len(parts) == 2:  # explicit path -> upload if it exists
+        p = os.path.expanduser(parts[1].strip())
+        if not os.path.isabs(p):
+            p = os.path.join(root, p)
+        p = os.path.abspath(p)
+        if not os.path.isfile(p):
+            send(chat_id, f"No file at <code>{html.escape(p)}</code>.")
+            return
+        ok, err = send_document(chat_id, p, caption=f"📄 <code>{html.escape(p)}</code>")
+        if not ok:
+            send(chat_id, f"⚠️ Couldn't send <code>{html.escape(p)}</code>"
+                          + (f": {html.escape(err)}" if err else "") + ".")
+    else:  # no path -> open the file browser at root
+        GETFILE_DIR[chat_id] = root
+        send(chat_id, f"📂 <code>{html.escape(root)}</code>\nPick a file to send:",
+             reply_markup=build_file_keyboard(root, 0))
+
+
 def kill_confirm_kb(disp):
     """Two-button confirm for killing the session named `disp`."""
     return {"inline_keyboard": [[
@@ -1088,11 +1120,15 @@ def handle_message(msg):
     # session, no guessing. The target is recovered even after a restart.
     session = session_from_reply(msg.get("reply_to_message"))
     if session:
-        if not text.strip():
-            send(chat_id, "Nothing to send (empty message).")
-            return
         if session not in set(list_sessions()):
             send(chat_id, f"Session <b>{html.escape(display_name(session))}</b> is gone.")
+            return
+        # Replying with /getfile browses that session's folder, not relays it.
+        if text.strip().startswith("/getfile"):
+            do_getfile(chat_id, text.strip(), session_cwd(session))
+            return
+        if not text.strip():
+            send(chat_id, "Nothing to send (empty message).")
             return
         ok = send_input(session, text)
         send(
@@ -1120,6 +1156,7 @@ def handle_message(msg):
             "• <code>/kill &lt;name&gt;</code> — kill one directly (asks to confirm).\n"
             "• <code>/getfile</code> — browse from the project root and send a file here.\n"
             "• <code>/getfile &lt;path&gt;</code> — send that file directly if it exists.\n"
+            "• Reply to a session with <code>/getfile</code> — browse that project's folder.\n"
             "• <code>/setting</code> — configure pane view, notify threshold, etc.\n"
             "• <code>/restart</code> — restart me. <code>/upgrade</code> — update + restart.\n"
             "• Send plain text — I'll ask which session to send it to.",
@@ -1230,25 +1267,7 @@ def handle_message(msg):
         return
 
     if text.startswith("/getfile"):
-        parts = text.split(maxsplit=1)
-        root = PROJECT_ROOT or os.path.expanduser("~")
-        if len(parts) == 2:  # explicit path -> upload it if it exists
-            p = os.path.expanduser(parts[1].strip())
-            if not os.path.isabs(p):
-                p = os.path.join(root, p)
-            p = os.path.abspath(p)
-            if not os.path.isfile(p):
-                send(chat_id, f"No file at <code>{html.escape(p)}</code>.")
-                return
-            ok, err = send_document(chat_id, p,
-                                    caption=f"📄 <code>{html.escape(p)}</code>")
-            if not ok:
-                send(chat_id, f"⚠️ Couldn't send <code>{html.escape(p)}</code>"
-                              + (f": {html.escape(err)}" if err else "") + ".")
-        else:  # no path -> open the file browser at the project root
-            GETFILE_DIR[chat_id] = root
-            send(chat_id, f"📂 <code>{html.escape(root)}</code>\nPick a file to send:",
-                 reply_markup=build_file_keyboard(root, 0))
+        do_getfile(chat_id, text, PROJECT_ROOT)
         return
 
     if text.startswith("/"):
