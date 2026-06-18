@@ -13,7 +13,9 @@ import urllib.parse
 import urllib.request
 
 from core.config import IDLE_TICKS, INTERVAL, PIDFILE, PREFIX, RESTART_SIG, RESTORE_SESSIONS, ROOT, SNAPSHOT_FILE, SNAPSHOT_INTERVAL, STATE_DIR, require_config
+from core.sessions import display_name, full_name, session_cwd, session_exists
 from muxpost.callbacks import handle_callback
+from muxpost.control import sessions_by_recency
 from muxpost.handlers import handle_message
 from muxpost.monitor import monitor_tick, restore_from_snapshot, snapshot_sessions
 from muxpost.process import _flush_notify, _read_pid, git_pull, restart_inplace, running_pid, version
@@ -138,6 +140,8 @@ usage: muxpost <command>
   restart    restart the running bot in place (or start it)
   upgrade    git pull the latest, then restart the running bot
   status     show version and whether the bot is running
+  list       list running claude-* sessions (most recent first)
+  attach <name>  attach to a session's terminal (tmux attach / switch-client)
   restore    recreate snapshot sessions that aren't running (resume claude)
   snapshot   record current claude-* sessions for later restore
   mcp        run as an MCP server over stdio (agent -> user messaging)
@@ -208,6 +212,37 @@ def cli_status():
     print(f"running: yes (pid {pid})" if pid else "running: no")
 
 
+def cli_list():
+    load_last_sent()  # so ordering reflects what you last worked on
+    sessions = sessions_by_recency()
+    if not sessions:
+        print(f"No {PREFIX}* sessions running.")
+        return
+    print(f"{len(sessions)} session(s), most recent first:")
+    for full in sessions:
+        print(f"  {display_name(full):<24} {session_cwd(full) or ''}")
+    print("\nattach with:  muxpost attach <name>")
+
+
+def cli_attach(name):
+    if not name:
+        print("usage: muxpost attach <session-name>  (see: muxpost list)", file=sys.stderr)
+        sys.exit(2)
+    full = full_name(name)
+    if not session_exists(full):
+        print(f"no session '{display_name(full)}' — see: muxpost list", file=sys.stderr)
+        sys.exit(1)
+    # Replace this process with tmux so it owns the terminal. switch-client when
+    # we're already inside tmux (attach would refuse to nest).
+    argv = (["tmux", "switch-client", "-t", full] if os.environ.get("TMUX")
+            else ["tmux", "attach-session", "-t", full])
+    try:
+        os.execvp("tmux", argv)
+    except OSError as exc:
+        print(f"couldn't run tmux: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cli():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
     if cmd == "run":
@@ -222,6 +257,10 @@ def cli():
         cli_upgrade()
     elif cmd == "status":
         cli_status()
+    elif cmd in ("list", "ls"):
+        cli_list()
+    elif cmd == "attach":
+        cli_attach(sys.argv[2] if len(sys.argv) > 2 else "")
     elif cmd == "restore":
         n = restore_from_snapshot()
         print(f"restored {n} session(s)" if n else "nothing to restore "
