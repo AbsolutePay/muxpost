@@ -123,6 +123,14 @@ def _upload(method, field, chat_id, path, caption=None):
         with urllib.request.urlopen(req, timeout=180) as resp:
             res = json.load(resp)
         return bool(res.get("ok")), res.get("description", "")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode()).get("description", "")
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[api] {method} failed: HTTP {exc.code} {detail}", file=sys.stderr)
+        return False, detail or f"HTTP {exc.code}"
     except Exception as exc:  # noqa: BLE001
         print(f"[api] {method} failed: {exc}", file=sys.stderr)
         return False, str(exc)
