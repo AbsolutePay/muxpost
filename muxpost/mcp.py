@@ -65,7 +65,12 @@ TOOLS = [
 # helpers
 # --------------------------------------------------------------------------
 def _root():
-    return os.path.abspath(PROJECT_ROOT or os.path.expanduser("~"))
+    """The single allow-listed root, or None if no project root is configured.
+
+    Intentionally does NOT fall back to $HOME — that would let an agent read
+    ~/.ssh, ~/.env, etc. No root configured ⇒ send_file/send_photo are refused.
+    """
+    return os.path.abspath(PROJECT_ROOT) if PROJECT_ROOT else None
 
 
 def _allowed_path(path):
@@ -73,9 +78,9 @@ def _allowed_path(path):
 
     Stops an agent from exfiltrating arbitrary files (e.g. ~/.ssh) via muxpost.
     """
-    if not path:
-        return None
     root = _root()
+    if not path or not root:
+        return None
     p = os.path.expanduser(path)
     if not os.path.isabs(p):           # relative paths resolve against the root
         p = os.path.join(root, p)
@@ -112,7 +117,10 @@ def _call_tool(name, args):
         if name in ("send_file", "send_photo"):
             p = _allowed_path(args.get("path"))
             if not p:
-                return _text(f"path must be inside the allowed root ({_root()})", err=True)
+                root = _root()
+                if not root:
+                    return _text("disabled: no project root configured (run muxpost init)", err=True)
+                return _text(f"path must be inside the allowed root ({root})", err=True)
             if not os.path.isfile(p):
                 return _text(f"no file at {p}", err=True)
             caption = args.get("caption")
