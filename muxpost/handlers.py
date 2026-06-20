@@ -22,6 +22,29 @@ from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDI
 from muxpost.telegram import download_file, edit, send, send_document
 
 INCOMING_DIR = os.path.join(STATE_DIR, "incoming")  # downloaded user files land here
+INCOMING_TTL_DAYS = 7
+
+
+def prune_incoming(ttl_days=INCOMING_TTL_DAYS):
+    """Delete downloaded files older than ttl_days from the incoming dir.
+
+    Called at startup so received files don't accumulate forever. Returns the
+    number removed.
+    """
+    removed = 0
+    try:
+        cutoff = time.time() - ttl_days * 86400
+        for name in os.listdir(INCOMING_DIR):
+            p = os.path.join(INCOMING_DIR, name)
+            try:
+                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+                    removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass  # dir doesn't exist yet — nothing to prune
+    return removed
 
 
 def _message_file(msg):

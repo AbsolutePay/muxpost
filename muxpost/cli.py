@@ -16,7 +16,7 @@ from core.config import IDLE_TICKS, INTERVAL, PIDFILE, PREFIX, PROJECT_ROOT, RES
 from core.sessions import display_name, full_name, launch_session, list_subdirs, sanitize_name, session_cwd, session_exists
 from muxpost.callbacks import handle_callback
 from muxpost.control import sessions_by_recency
-from muxpost.handlers import handle_message
+from muxpost.handlers import handle_message, prune_incoming
 from muxpost.monitor import monitor_tick, restore_from_snapshot, snapshot_sessions
 from muxpost.process import _flush_notify, _read_pid, git_pull, restart_inplace, running_pid, version
 from muxpost.state import load_last_sent, load_offset, load_settings, load_state, save_offset
@@ -67,6 +67,9 @@ def main():
     load_state()  # restore report flags so a restart doesn't re-notify
     load_last_sent()  # restore picker ordering (last message sent per session)
     load_settings()  # restore user settings (pane view, notify threshold, …)
+    pruned = prune_incoming()  # clear old received files so they don't pile up
+    if pruned:
+        print(f"pruned {pruned} old incoming file(s)")
 
     # record our PID and install an in-place restart on SIGHUP
     try:
