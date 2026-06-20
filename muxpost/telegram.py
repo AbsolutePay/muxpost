@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core.config import API, DOC_MAX_BYTES
+from core.config import API, DOC_MAX_BYTES, TOKEN
 
 
 def api(method, _timeout=20, **params):
@@ -136,3 +136,29 @@ def send_document(chat_id, path, caption=None):
 def send_photo(chat_id, path, caption=None):
     """Upload a local image to the chat with inline preview. Returns (ok, error)."""
     return _upload("sendPhoto", "photo", chat_id, path, caption)
+
+
+def download_file(file_id, dest_dir, suggested_name=None):
+    """Download a Telegram file (document/photo/…) into dest_dir.
+
+    getFile -> file_path on Telegram's server -> fetch it. Bot download is
+    capped at 20 MB by Telegram. Returns (local_path | None, error_message).
+    """
+    r = api("getFile", file_id=file_id)
+    if not r.get("ok"):
+        return None, r.get("description") or r.get("error") or "getFile failed"
+    fpath = (r.get("result") or {}).get("file_path")
+    if not fpath:
+        return None, "Telegram returned no file_path"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_",
+                  suggested_name or os.path.basename(fpath) or "file") or "file"
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, name)
+        url = f"https://api.telegram.org/file/bot{TOKEN}/{fpath}"
+        with urllib.request.urlopen(url, timeout=180) as resp, open(dest, "wb") as fh:
+            fh.write(resp.read())
+        return dest, ""
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] download_file failed: {exc}", file=sys.stderr)
+        return None, str(exc)

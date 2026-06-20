@@ -36,6 +36,10 @@ PENDING_NEW = {}
 GETFILE_DIR = {}
 
 
+# chat_id -> {"path", "caption"} for a downloaded file awaiting a "which session?" pick
+PENDING_FILE = {}
+
+
 def load_state():
     """Restore per-session report state so a restart doesn't re-notify."""
     try:

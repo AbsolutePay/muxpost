@@ -12,14 +12,62 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core.config import PREFIX, PROJECT_ROOT, USER_ID
+from core.config import PREFIX, PROJECT_ROOT, STATE_DIR, USER_ID
 from core.sessions import capture_pane, display_name, full_name, launch_session, list_sessions, list_subdirs, sanitize_name, session_cwd, session_exists
 from muxpost.control import send_input, send_interrupt, session_from_reply, sessions_by_recency
 from muxpost.menus import CONFIRM_KB, action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, kill_confirm_kb, settings_keyboard
 from muxpost.panes import status_text
 from muxpost.process import git_pull, restart_inplace, version, write_notify
-from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_NEW
-from muxpost.telegram import edit, send, send_document
+from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW
+from muxpost.telegram import download_file, edit, send, send_document
+
+INCOMING_DIR = os.path.join(STATE_DIR, "incoming")  # downloaded user files land here
+
+
+def _message_file(msg):
+    """If the message carries a downloadable file, return (file_id, name|None)."""
+    if msg.get("document"):
+        d = msg["document"]
+        return d["file_id"], d.get("file_name")
+    if msg.get("photo"):
+        return msg["photo"][-1]["file_id"], None        # largest size; name derived
+    for key in ("video", "audio", "voice", "animation", "video_note"):
+        if msg.get(key):
+            return msg[key]["file_id"], msg[key].get("file_name")
+    return None
+
+
+def _relay_file(chat_id, session, path, caption, reply_to=None):
+    """Type the caption + downloaded file path into a session as one line."""
+    cap = " ".join((caption or "").split())  # single line — newlines submit early
+    relayed = f"{cap} [file: {path}]" if cap else f"[file: {path}]"
+    ok = send_input(session, relayed)
+    disp = html.escape(display_name(session))
+    send(chat_id,
+         (f"✅ File sent to <b>{disp}</b>:\n<code>{html.escape(path)}</code>"
+          if ok else f"⚠️ Failed to send file to <b>{disp}</b>."),
+         reply_to=reply_to)
+
+
+def handle_incoming_file(msg, finfo):
+    """Download a file the user sent, then relay its path (+caption) to a session."""
+    chat_id = msg["chat"]["id"]
+    file_id, fname = finfo
+    caption = msg.get("caption") or ""
+    path, err = download_file(file_id, INCOMING_DIR, fname)
+    if not path:
+        send(chat_id, f"⚠️ Couldn't download that file: {html.escape(err)}")
+        return
+    session = session_from_reply(msg.get("reply_to_message"))
+    if session:
+        if session not in set(list_sessions()):
+            send(chat_id, f"Session <b>{html.escape(display_name(session))}</b> is gone.")
+            return
+        _relay_file(chat_id, session, path, caption, reply_to=msg["message_id"])
+    else:
+        PENDING_FILE[chat_id] = {"path": path, "caption": caption}
+        show_selection(chat_id, "sf", "Send this file to which session?",
+                       reply_to=msg["message_id"])
 
 
 def rebuild_status(chat_id, message_id, full, note=None):
@@ -126,6 +174,12 @@ def handle_message(msg):
             do_new(chat_id, folder, workdir)
             return
         NEW_DIR_WAIT.pop(chat_id, None)  # a command cancels the wait; fall through
+
+    # A) A file/photo attachment -> download it and relay its path to a session.
+    finfo = _message_file(msg)
+    if finfo:
+        handle_incoming_file(msg, finfo)
+        return
 
     # 1) Reply to a report/status/action message -> relay straight to that
     # session, no guessing. The target is recovered even after a restart.

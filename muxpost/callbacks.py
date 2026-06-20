@@ -15,10 +15,10 @@ import urllib.request
 from core.config import PROJECT_ROOT, SETTINGS_SPEC, USER_ID
 from core.sessions import _tmux, capture_pane, display_name, full_name, list_dir_entries, list_sessions, list_subdirs, session_exists
 from muxpost.control import kill_session, send_input, send_interrupt, send_queued, sessions_by_recency
-from muxpost.handlers import do_new, rebuild_status
+from muxpost.handlers import _relay_file, do_new, rebuild_status
 from muxpost.menus import action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, detect_menu, kill_confirm_kb, settings_keyboard
 from muxpost.panes import status_text
-from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_NEW, cycle_setting, mark_sent
+from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW, cycle_setting, mark_sent
 from muxpost.telegram import answer, edit, send, send_document
 
 
@@ -253,9 +253,10 @@ def handle_callback(cq):
             answer(cq["id"], "Killed" if ok else "Failed")
             return
 
-    # Cancel a picker (status / send / kill / stop).
+    # Cancel a picker (status / send / kill / stop / file).
     if kind == "c":
         PENDING.pop(chat_id, None)
+        PENDING_FILE.pop(chat_id, None)
         edit(chat_id, message_id, text="✖️ Cancelled.")
         answer(cq["id"])
         return
@@ -301,6 +302,17 @@ def handle_callback(cq):
                 text=(f"✅ Sent to <b>{disp}</b>:\n<code>{preview}</code>"
                       if ok else f"⚠️ Failed to send to <b>{disp}</b>."),
             )
+            answer(cq["id"])
+            return
+
+        if tag == "sf":
+            pending = PENDING_FILE.pop(chat_id, None)
+            if pending is None:
+                edit(chat_id, message_id, text="⌛ That file expired. Send it again.")
+                answer(cq["id"])
+                return
+            edit(chat_id, message_id, text=f"📎 Sending file to <b>{html.escape(display_name(full))}</b>…")
+            _relay_file(chat_id, full, pending["path"], pending["caption"])
             answer(cq["id"])
             return
 
