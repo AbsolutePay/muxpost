@@ -106,7 +106,11 @@ def _normalize_menu_state(pane):
 
 def _pane_hash(pane):
     # stable across processes (unlike hash()) so persisted state survives restarts.
-    # While a menu is up, hash with its selection state normalized away, so
+    # Hash the CLEANED pane — the same content we show in the report — not the raw
+    # capture. Otherwise volatile chrome that clean_pane strips (the status footer,
+    # the '/clear to save … tokens' hint, dividers) can flicker, flip idle tracking,
+    # and fire a second report with a visibly identical screen.
+    # While a menu is up, hash with its selection state normalized away instead, so
     # checking/toggling options doesn't reset idle tracking and re-notify.
-    text = _normalize_menu_state(pane) if detect_menu(pane) else pane
+    text = _normalize_menu_state(pane) if detect_menu(pane) else clean_pane(pane)
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
