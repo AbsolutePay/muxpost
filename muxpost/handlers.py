@@ -12,13 +12,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core.config import PREFIX, PROJECT_ROOT, STATE_DIR, USER_ID
+from core.config import PREFIX, PROJECT_ROOT, STATE_DIR, USER_ID, setting
 from core.sessions import capture_pane, display_name, full_name, launch_session, list_sessions, list_subdirs, sanitize_name, session_cwd, session_exists
 from muxpost.control import send_input, send_interrupt, session_from_reply, sessions_by_recency
 from muxpost.menus import CONFIRM_KB, action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, kill_confirm_kb, settings_keyboard
-from muxpost.panes import status_text
+from muxpost.panes import _pane_hash, status_text
 from muxpost.process import git_pull, restart_inplace, version, write_notify
-from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW
+from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW, STATE
 from muxpost.telegram import download_file, edit, send, send_document
 
 INCOMING_DIR = os.path.join(STATE_DIR, "incoming")  # downloaded user files land here
@@ -101,6 +101,12 @@ def rebuild_status(chat_id, message_id, full, note=None, markup=None):
     with a timestamp; falling back to a plain refresh stamp.
     """
     pane = capture_pane(full)
+    if pane is not None:
+        # We just showed the user this exact screen, so treat it as a baseline:
+        # scrolling/refreshing changes the pane but shouldn't trigger a fresh
+        # idle notification. Re-fires only when the pane changes AFTER this.
+        STATE[full] = {"hash": _pane_hash(pane), "count": setting("idle_ticks"),
+                       "reported": True}
     stamp = time.strftime("%H:%M:%S")
     tail = f"{note} · {stamp}" if note else f"🔄 Refreshed {stamp}"
     edit(chat_id, message_id,
