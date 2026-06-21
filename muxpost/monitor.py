@@ -105,8 +105,9 @@ def baseline_sessions():
         pane = capture_pane(session)
         if pane is None:
             continue
-        STATE[session] = {"hash": _pane_hash(pane), "count": setting("idle_ticks"),
-                          "reported": True}
+        h = _pane_hash(pane)
+        STATE[session] = {"hash": h, "count": setting("idle_ticks"),
+                          "reported": True, "last_report": h}
     save_state()
 
 
@@ -123,13 +124,21 @@ def monitor_tick():
         if st is None:
             # First time we see this session (fresh start or newly created):
             # treat whatever is on screen now as a baseline — don't notify it.
-            STATE[session] = {"hash": digest, "count": idle_ticks, "reported": True}
+            STATE[session] = {"hash": digest, "count": idle_ticks,
+                              "reported": True, "last_report": digest}
             dbg(f"{session} baseline {digest[:8]}")
             continue
         if digest == st["hash"]:
             st["count"] += 1
             if st["count"] >= idle_ticks and not st["reported"]:
                 st["reported"] = True
+                # Suppress if this settled screen is identical to the one we last
+                # notified about: a transient flicker (overlay/redraw) that reverts
+                # to the same screen re-arms the FSM but isn't new — don't re-notify.
+                if digest == st.get("last_report"):
+                    dbg(f"{session} settle == last report, suppress ({digest[:8]})")
+                    continue
+                st["last_report"] = digest
                 mid = send(USER_ID, status_text(session, pane, "💤"),
                            reply_markup=action_keyboard(session, pane))
                 dbg(f"report {session} idle {st['count']} ticks -> "
