@@ -76,8 +76,12 @@ DEBUG = _as_bool(_conf("TG_DEBUG", "debug", False))
 
 
 def dbg(msg):
-    """Trace line to stderr (the journal) when debug is on; no-op otherwise."""
-    if DEBUG:
+    """Trace line to stderr (the journal) when debug is on; no-op otherwise.
+
+    Reads the live setting so /settings can toggle it without a restart; falls
+    back to the TG_DEBUG env/config value as the default.
+    """
+    if setting("debug"):
         print(f"[dbg {time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
@@ -91,10 +95,12 @@ SETTINGS_SPEC = {
     "pane_view":  {"label": "📜 Pane view",      "values": ["expandable", "compact"]},
     "pane_lines": {"label": "📏 Pane lines",      "values": [15, 30, 60]},
     "idle_ticks": {"label": "🔔 Notify after ticks", "values": [2, 3, 4, 5]},
+    "debug":      {"label": "🐞 Debug log",         "values": [False, True]},
 }
 
 
-SETTINGS_DEFAULTS = {"pane_view": "expandable", "pane_lines": 60, "idle_ticks": IDLE_TICKS}
+SETTINGS_DEFAULTS = {"pane_view": "expandable", "pane_lines": 60,
+                     "idle_ticks": IDLE_TICKS, "debug": DEBUG}
 
 
 SETTINGS = {}  # overrides loaded from SETTINGS_FILE
