@@ -18,9 +18,9 @@ from muxpost.callbacks import handle_callback
 from muxpost.control import sessions_by_recency
 from muxpost.handlers import handle_message, prune_incoming
 from muxpost.picker import _exec_attach, cli_new
-from muxpost.monitor import monitor_tick, restore_from_snapshot, snapshot_sessions
+from muxpost.monitor import baseline_sessions, monitor_tick, restore_from_snapshot, snapshot_sessions
 from muxpost.process import _flush_notify, _read_pid, git_pull, restart_inplace, running_pid, version
-from muxpost.state import load_last_sent, load_offset, load_settings, load_state, save_offset
+from muxpost.state import load_last_sent, load_offset, load_settings, save_offset
 from muxpost.telegram import api
 
 
@@ -65,7 +65,7 @@ def main():
           f"Watching '{PREFIX}*' every {INTERVAL}s, "
           f"reporting after {IDLE_TICKS} idle ticks.")
     register_commands()
-    load_state()  # restore report flags so a restart doesn't re-notify
+    baseline_sessions()  # restart = init: don't report sessions already idle
     load_last_sent()  # restore picker ordering (last message sent per session)
     load_settings()  # restore user settings (pane view, notify threshold, …)
     pruned = prune_incoming()  # clear old received files so they don't pile up

@@ -40,17 +40,6 @@ GETFILE_DIR = {}
 PENDING_FILE = {}
 
 
-def load_state():
-    """Restore per-session report state so a restart doesn't re-notify."""
-    try:
-        with open(STATE_FILE, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, dict):
-            STATE.update(data)
-    except (OSError, ValueError):
-        pass
-
-
 def save_state():
     try:
         os.makedirs(STATE_DIR, exist_ok=True)

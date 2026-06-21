@@ -63,6 +63,19 @@ def restore_from_snapshot():
     return restored
 
 
+def baseline_sessions():
+    """Treat every live session's current screen as a baseline so a restart
+    counts as init — no reports for sessions that were already idle. A report
+    only fires once a pane CHANGES after startup and then settles."""
+    for session in list_sessions():
+        pane = capture_pane(session)
+        if pane is None:
+            continue
+        STATE[session] = {"hash": _pane_hash(pane), "count": setting("idle_ticks"),
+                          "reported": True}
+    save_state()
+
+
 def monitor_tick():
     live = list_sessions()
     live_set = set(live)
