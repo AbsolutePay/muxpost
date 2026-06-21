@@ -102,6 +102,11 @@ After=network-online.target
 
 [Service]
 Type=simple
+# Only kill muxpost's own process on stop/restart — NOT the whole cgroup.
+# tmux servers muxpost spawns share this unit's cgroup; the default
+# KillMode=control-group would SIGTERM them on restart, killing every claude
+# session. KillMode=process leaves the tmux server (and claude) running.
+KillMode=process
 WorkingDirectory=$SCRIPT_DIR
 ExecStart=$PYTHON $SCRIPT_DIR/muxpost.py
 Restart=on-failure
