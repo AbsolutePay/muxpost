@@ -157,7 +157,36 @@ def action_keyboard(full, pane):
             label = q if len(q) <= 40 else q[:39] + "…"
             rows.append([{"text": f"▶️ Send queued: {label}",
                           "callback_data": f"q|{disp}"}])
-    rows.append([{"text": "🔄 Refresh", "callback_data": f"rf|{disp}"}])
+    rows.append([{"text": "⌨️ Keys", "callback_data": f"k|{disp}|pad"},
+                 {"text": "🔄 Refresh", "callback_data": f"rf|{disp}"}])
+    return {"inline_keyboard": rows}
+
+
+# Common Claude Code keys, sent verbatim to the pane via `tmux send-keys`.
+# Names are tmux key names (BTab = Shift-Tab, C-c = Ctrl-C). Esc interrupts,
+# Shift-Tab cycles permission modes, PageUp/Down scroll the transcript.
+KEYS = [
+    ("←", "Left"), ("↑", "Up"), ("↓", "Down"), ("→", "Right"),
+    ("PgUp", "PageUp"), ("PgDn", "PageDown"), ("Esc", "Escape"), ("⏎ Enter", "Enter"),
+    ("Tab", "Tab"), ("⇧Tab", "BTab"), ("Ctrl-C", "C-c"),
+]
+KEY_LABEL = {key: lbl for lbl, key in KEYS}
+
+
+def keys_keyboard(disp):
+    """Key-pad for a status message: each button sends that key to the session
+    and refreshes. Replaces the option buttons while open; Close brings them
+    back, Refresh re-captures and stays on the pad."""
+    rows, row = [], []
+    for lbl, key in KEYS:
+        row.append({"text": lbl, "callback_data": f"k|{disp}|{key}"})
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "✖️ Close", "callback_data": f"k|{disp}|close"},
+                 {"text": "🔄 Refresh", "callback_data": f"k|{disp}|pad"}])
     return {"inline_keyboard": rows}
 
 

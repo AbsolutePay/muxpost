@@ -16,7 +16,7 @@ from core.config import PROJECT_ROOT, SETTINGS_SPEC, USER_ID
 from core.sessions import _tmux, capture_pane, display_name, full_name, list_dir_entries, list_sessions, list_subdirs, session_exists
 from muxpost.control import kill_session, send_input, send_interrupt, send_queued, sessions_by_recency
 from muxpost.handlers import _relay_file, do_new, rebuild_status
-from muxpost.menus import action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, detect_menu, kill_confirm_kb, settings_keyboard
+from muxpost.menus import KEY_LABEL, action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, detect_menu, keys_keyboard, kill_confirm_kb, settings_keyboard
 from muxpost.panes import status_text
 from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW, cycle_setting, mark_sent
 from muxpost.telegram import answer, edit, send, send_document
@@ -60,6 +60,32 @@ def handle_callback(cq):
             return
         rebuild_status(chat_id, message_id, full)
         answer(cq["id"], "Refreshed")
+        return
+
+    # Key-pad: open it (hides the option buttons), send a key, or close it.
+    if tag == "k":
+        full = full_name(kind)
+        if not session_exists(full):
+            answer(cq["id"], "Session is gone")
+            edit(chat_id, message_id, reply_markup=None)
+            return
+        if val == "close":
+            rebuild_status(chat_id, message_id, full, note="⌨️ Closed keys")
+            answer(cq["id"])
+            return
+        if val == "pad":  # open the pad / refresh while on it
+            rebuild_status(chat_id, message_id, full, note="⌨️ Keys",
+                           markup=keys_keyboard(kind))
+            answer(cq["id"])
+            return
+        ok = _tmux(["send-keys", "-t", full, val]).returncode == 0
+        if ok:
+            mark_sent(full)
+        label = KEY_LABEL.get(val, val)
+        answer(cq["id"], f"Sent {label}" if ok else "Failed")
+        rebuild_status(chat_id, message_id, full,
+                       note=f"⌨️ {label}" if ok else f"⚠️ Failed: {label}",
+                       markup=keys_keyboard(kind))
         return
 
     # Send a queued/suggested message Claude staged in the prompt.

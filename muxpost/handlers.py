@@ -93,7 +93,7 @@ def handle_incoming_file(msg, finfo):
                        reply_to=msg["message_id"])
 
 
-def rebuild_status(chat_id, message_id, full, note=None):
+def rebuild_status(chat_id, message_id, full, note=None, markup=None):
     """Re-capture the pane and rewrite a status/report message in place.
 
     Keeps the message live: fresh pane, current menu/queue buttons, and an
@@ -105,7 +105,7 @@ def rebuild_status(chat_id, message_id, full, note=None):
     tail = f"{note} · {stamp}" if note else f"🔄 Refreshed {stamp}"
     edit(chat_id, message_id,
          text=status_text(full, pane) + f"\n<i>{tail}</i>",
-         reply_markup=action_keyboard(full, pane))
+         reply_markup=markup if markup is not None else action_keyboard(full, pane))
     MSG_SESSION[message_id] = full
 
 
