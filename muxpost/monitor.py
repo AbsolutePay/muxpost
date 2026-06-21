@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core.config import PREFIX, SNAPSHOT_FILE, STATE_DIR, USER_ID, setting
+from core.config import BOOT_FILE, PREFIX, SNAPSHOT_FILE, STATE_DIR, USER_ID, setting
 from core.sessions import _session_field, capture_pane, launch_session, list_sessions, session_exists
 from muxpost.menus import action_keyboard
 from muxpost.panes import _pane_hash, status_text
@@ -61,6 +61,40 @@ def restore_from_snapshot():
             restored += 1
             print(f"restored {name} in {workdir} ({info})")
     return restored
+
+
+def _boot_time():
+    """System boot time (epoch secs) as a string — constant across muxpost
+    restarts/upgrades, changes only on an actual reboot."""
+    try:
+        with open("/proc/stat", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("btime "):
+                    return line.split()[1]
+    except OSError:
+        pass
+    return None
+
+
+def restore_on_boot():
+    """Recreate snapshot sessions, but only ONCE per machine boot. A muxpost
+    restart/upgrade re-execs with tmux untouched, so it must not revive sessions
+    the user deliberately killed — only a real reboot (new boot time) restores."""
+    boot = _boot_time()
+    try:
+        with open(BOOT_FILE, encoding="utf-8") as fh:
+            if boot is not None and fh.read().strip() == boot:
+                return 0  # already restored for this boot
+    except OSError:
+        pass
+    n = restore_from_snapshot()
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(BOOT_FILE, "w", encoding="utf-8") as fh:
+            fh.write(boot or "")
+    except OSError:
+        pass
+    return n
 
 
 def baseline_sessions():

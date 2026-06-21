@@ -131,6 +131,11 @@ SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
 SNAPSHOT_FILE = os.path.join(STATE_DIR, "sessions_snapshot.json")
 
 
+# Records the boot time we last auto-restored for, so a muxpost restart/upgrade
+# (same boot) skips restore and only an actual reboot revives sessions.
+BOOT_FILE = os.path.join(STATE_DIR, "restored_boot")
+
+
 RESTART_SIG = getattr(signal, "SIGHUP", None)
 
 

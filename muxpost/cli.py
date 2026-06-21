@@ -18,7 +18,7 @@ from muxpost.callbacks import handle_callback
 from muxpost.control import sessions_by_recency
 from muxpost.handlers import handle_message, prune_incoming
 from muxpost.picker import _exec_attach, cli_new
-from muxpost.monitor import baseline_sessions, monitor_tick, restore_from_snapshot, snapshot_sessions
+from muxpost.monitor import baseline_sessions, monitor_tick, restore_from_snapshot, restore_on_boot, snapshot_sessions
 from muxpost.process import _flush_notify, _read_pid, git_pull, restart_inplace, running_pid, version
 from muxpost.state import load_last_sent, load_offset, load_settings, save_offset
 from muxpost.telegram import api
@@ -94,7 +94,7 @@ def main():
     _flush_notify()  # tell the user we're back, if a restart queued it
 
     if RESTORE_SESSIONS:
-        n = restore_from_snapshot()
+        n = restore_on_boot()  # reboot-only: a muxpost restart/upgrade won't revive sessions
         if n:
             print(f"restored {n} session(s) from snapshot")
 
