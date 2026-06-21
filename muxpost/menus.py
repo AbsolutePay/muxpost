@@ -167,8 +167,8 @@ def action_keyboard(full, pane):
 # Shift-Tab cycles permission modes, PageUp/Down scroll the transcript.
 KEYS = [
     ("←", "Left"), ("↑", "Up"), ("↓", "Down"), ("→", "Right"),
-    ("PgUp", "PageUp"), ("PgDn", "PageDown"), ("Esc", "Escape"), ("⏎ Enter", "Enter"),
-    ("Tab", "Tab"), ("⇧Tab", "BTab"), ("Ctrl-C", "C-c"),
+    ("PgUp", "PageUp"), ("PgDn", "PageDown"), ("Ctrl-End", "C-End"), ("⏎ Enter", "Enter"),
+    ("Tab", "Tab"), ("⇧Tab", "BTab"), ("Esc", "Escape"), ("Ctrl-C", "C-c"),
 ]
 KEY_LABEL = {key: lbl for lbl, key in KEYS}
 
