@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core.config import BOOT_FILE, PREFIX, SNAPSHOT_FILE, STATE_DIR, USER_ID, setting
+from core.config import BOOT_FILE, PREFIX, SNAPSHOT_FILE, STATE_DIR, USER_ID, dbg, setting
 from core.sessions import _session_field, capture_pane, launch_session, list_sessions, session_exists
 from muxpost.menus import action_keyboard
 from muxpost.panes import _pane_hash, status_text
@@ -124,6 +124,7 @@ def monitor_tick():
             # First time we see this session (fresh start or newly created):
             # treat whatever is on screen now as a baseline — don't notify it.
             STATE[session] = {"hash": digest, "count": idle_ticks, "reported": True}
+            dbg(f"{session} baseline {digest[:8]}")
             continue
         if digest == st["hash"]:
             st["count"] += 1
@@ -131,9 +132,14 @@ def monitor_tick():
                 st["reported"] = True
                 mid = send(USER_ID, status_text(session, pane, "💤"),
                            reply_markup=action_keyboard(session, pane))
+                dbg(f"report {session} idle {st['count']} ticks -> "
+                    f"{'sent #' + str(mid) if mid else 'SEND FAILED'} ({digest[:8]})")
                 if mid:
                     MSG_SESSION[mid] = session
+            else:
+                dbg(f"{session} idle {st['count']}/{idle_ticks} reported={st['reported']} {digest[:8]}")
         else:
+            dbg(f"{session} changed {st['hash'][:8]}->{digest[:8]} (count was {st['count']})")
             st["hash"] = digest
             st["count"] = 1
             st["reported"] = False

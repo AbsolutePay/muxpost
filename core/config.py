@@ -72,6 +72,15 @@ def _as_bool(v):
 RESTORE_SESSIONS = _as_bool(_conf("TG_RESTORE_SESSIONS", "restore_sessions", False))
 
 
+DEBUG = _as_bool(_conf("TG_DEBUG", "debug", False))
+
+
+def dbg(msg):
+    """Trace line to stderr (the journal) when debug is on; no-op otherwise."""
+    if DEBUG:
+        print(f"[dbg {time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
+
+
 SNAPSHOT_INTERVAL = float(_conf("TG_SNAPSHOT_INTERVAL", "snapshot_interval", 300))
 
 
