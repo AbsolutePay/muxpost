@@ -96,11 +96,12 @@ SETTINGS_SPEC = {
     "pane_lines": {"label": "📏 Pane lines",      "values": [15, 30, 60]},
     "idle_ticks": {"label": "🔔 Notify after ticks", "values": [2, 3, 4, 5]},
     "debug":      {"label": "🐞 Debug log",         "values": [False, True]},
+    "auto_route": {"label": "🎯 Auto-route replies", "values": [False, True]},
 }
 
 
 SETTINGS_DEFAULTS = {"pane_view": "expandable", "pane_lines": 60,
-                     "idle_ticks": IDLE_TICKS, "debug": DEBUG}
+                     "idle_ticks": IDLE_TICKS, "debug": DEBUG, "auto_route": False}
 
 
 SETTINGS = {}  # overrides loaded from SETTINGS_FILE

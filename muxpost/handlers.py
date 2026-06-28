@@ -18,7 +18,7 @@ from muxpost.control import send_input, send_interrupt, session_from_reply, sess
 from muxpost.menus import CONFIRM_KB, action_keyboard, build_dir_keyboard, build_file_keyboard, build_keyboard, kill_confirm_kb, settings_keyboard
 from muxpost.panes import _pane_hash, status_text
 from muxpost.process import git_pull, restart_inplace, version, write_notify
-from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW, STATE
+from muxpost.state import GETFILE_DIR, MSG_SESSION, NEW_DIR_WAIT, PENDING, PENDING_FILE, PENDING_NEW, STATE, last_session, remember_session
 from muxpost.telegram import download_file, edit, send, send_document
 
 INCOMING_DIR = os.path.join(STATE_DIR, "incoming")  # downloaded user files land here
@@ -113,6 +113,7 @@ def rebuild_status(chat_id, message_id, full, note=None, markup=None):
          text=status_text(full, pane) + f"\n<i>{tail}</i>",
          reply_markup=markup if markup is not None else action_keyboard(full, pane))
     MSG_SESSION[message_id] = full
+    remember_session(full)  # auto-route target: latest session you viewed
 
 
 def do_getfile(chat_id, text, root):
@@ -156,6 +157,7 @@ def do_new(chat_id, name, workdir, reply_to=None):
         )
         if mid:
             MSG_SESSION[mid] = full
+        remember_session(full)
         return
     ok, info = launch_session(full, workdir)
     if not ok:
@@ -172,6 +174,7 @@ def do_new(chat_id, name, workdir, reply_to=None):
     )
     if mid:
         MSG_SESSION[mid] = full
+    remember_session(full)
 
 
 def show_selection(chat_id, tag, prompt, reply_to=None):
@@ -319,6 +322,7 @@ def handle_message(msg):
                        reply_markup=action_keyboard(full, pane))
             if mid:
                 MSG_SESSION[mid] = full
+            remember_session(full)
         else:
             show_selection(chat_id, "st", "Select a session to inspect:")
         return
@@ -368,8 +372,19 @@ def handle_message(msg):
         send(chat_id, "Unknown command. Try /help.")
         return
 
-    # 3) Plain text with no reply -> ask which session to send it to.
+    # 3) Plain text with no reply.
     if text.strip():
+        # Auto-route (opt-in): send to the session of the last message muxpost
+        # sent, skipping the "which session?" pick. Falls through to the prompt
+        # if it's off, nothing's been sent yet, or that session is gone.
+        target = last_session()
+        if setting("auto_route") and target and target in set(list_sessions()):
+            ok = send_input(target, text)
+            send(chat_id,
+                 (f"✅ Sent to <b>{html.escape(display_name(target))}</b> "
+                  "<i>(auto-routed)</i>" if ok else "⚠️ Failed to send (tmux error)."),
+                 reply_to=msg["message_id"])
+            return
         PENDING[chat_id] = text
         show_selection(chat_id, "sn", "Send this to which session?",
                        reply_to=msg["message_id"])

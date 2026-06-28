@@ -16,7 +16,7 @@ from core.config import BOOT_FILE, PREFIX, SNAPSHOT_FILE, STATE_DIR, USER_ID, db
 from core.sessions import _session_field, capture_pane, launch_session, list_sessions, session_exists
 from muxpost.menus import action_keyboard
 from muxpost.panes import _pane_hash, status_text
-from muxpost.state import MSG_SESSION, STATE, save_state
+from muxpost.state import MSG_SESSION, STATE, remember_session, save_state
 from muxpost.telegram import send
 
 
@@ -143,6 +143,7 @@ def monitor_tick():
                            reply_markup=action_keyboard(session, pane))
                 dbg(f"report {session} idle {st['count']} ticks -> "
                     f"{'sent #' + str(mid) if mid else 'SEND FAILED'} ({digest[:8]})")
+                remember_session(session)  # auto-route target: latest reported session
                 if mid:
                     MSG_SESSION[mid] = session
             else:

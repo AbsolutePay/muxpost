@@ -24,6 +24,21 @@ LAST_SENT = {}
 MSG_SESSION = {}
 
 
+# Most recent session muxpost sent a message about (report/status/refresh).
+# In-memory only: after a restart with no new reports yet, auto-route falls back
+# to the "which session?" prompt. {"name": session}
+LAST_SESSION = {}
+
+
+def remember_session(session):
+    """Mark `session` as the latest one muxpost messaged about (auto-route target)."""
+    LAST_SESSION["name"] = session
+
+
+def last_session():
+    return LAST_SESSION.get("name")
+
+
 PENDING = {}
 
 
